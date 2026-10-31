@@ -1,4 +1,5 @@
 import type { Paint } from "./routeStyle";
+import type { TextStyle } from "./textStyle";
 import type { FinisherSource, Recipe } from "./stravaStickers";
 
 export type FormatId = "story" | "post" | "square";
@@ -49,6 +50,8 @@ export type Sticker = ImageLayer & {
   recipe?: Recipe;
   /** The route color it currently has. */
   paint?: Paint;
+  /** The text style it currently has. */
+  text?: TextStyle;
   /** Has no route (goal, difference badge): route colors skip it. */
   noRoute?: boolean;
   /** Untouched pixels of a gallery sticker; recoloring always starts from these. */

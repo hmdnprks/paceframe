@@ -7,7 +7,9 @@ import StravaPanel from "./StravaPanel";
 import InstallPrompt from "./InstallPrompt";
 import { isStandalone } from "./standalone";
 import CardOptions, { type CardSettings } from "./CardOptions";
-import { recipeHasRoute, recipeRun, renderFinisherCard, renderRecipe, withRun } from "./stravaStickers";
+import { recipeHasRoute, recipeHasText, recipeRun, renderFinisherCard, renderRecipe, withRun } from "./stravaStickers";
+import TextStyleSheet from "./TextStyleSheet";
+import { DEFAULT_TEXT, type TextStyle } from "./textStyle";
 import SwapRun from "./SwapRun";
 import type { Activity } from "@/app/lib/activity";
 import RouteColor from "./RouteColor";
@@ -43,6 +45,7 @@ import {
   SendToBack,
   SlidersHorizontal,
   Trash2,
+  Type,
   Ungroup,
   X,
   type LucideIcon,
@@ -53,7 +56,7 @@ import { DIVIDER, FORMATS, loadImage, panes, uid, type Background, type Format, 
 type Target = "bg" | "bg2" | string;
 const isBg = (t: Target | null) => t === "bg" || t === "bg2";
 type Pt = { x: number; y: number };
-type Sheet = null | "layout" | "tune" | "export" | "format" | "strava" | "edit" | "photo" | "color" | "swap";
+type Sheet = null | "layout" | "tune" | "export" | "format" | "strava" | "edit" | "photo" | "color" | "swap" | "text";
 
 const SNAP_PX = 10;
 const GROUP = "__group";
@@ -479,9 +482,10 @@ export default function Editor() {
     if (picking) {
       const hex = sampleAt({ x: e.clientX, y: e.clientY });
       setPicking(false);
-      if (hex) setRouteColors((st) => ({ ...st, colors: st.colors.map((c, i) => (i === Math.min(colorSlot, st.colors.length - 1) ? hex : c)) }));
-      else setToast("Tap on the photo to pick a color.");
-      setSheet("color");
+      if (!hex) setToast("Tap on the photo to pick a color.");
+      else if (pickFor.current === "text") setTextStyle((t) => ({ ...t, color: hex }));
+      else setRouteColors((st) => ({ ...st, colors: st.colors.map((c, i) => (i === Math.min(colorSlot, st.colors.length - 1) ? hex : c)) }));
+      setSheet(pickFor.current === "text" ? "text" : "color");
       return;
     }
     const el = e.target as HTMLElement;
@@ -638,6 +642,51 @@ export default function Editor() {
     } catch {}
   }, [routeColors]);
 
+  // ---- Text style (size, metrics layout, font, color) ----
+  const [textStyle, setTextStyle] = useState<TextStyle>(DEFAULT_TEXT);
+  const [restyling, setRestyling] = useState(false);
+  // Which setting the photo eyedropper fills.
+  const pickFor = useRef<"route" | "text">("route");
+  const TEXT_KEY = "paceframe:text-style";
+  useEffect(() => {
+    let saved: TextStyle | null = null;
+    try {
+      saved = JSON.parse(localStorage.getItem(TEXT_KEY) ?? "null");
+    } catch {}
+    if (saved?.font) queueMicrotask(() => setTextStyle({ ...DEFAULT_TEXT, ...saved }));
+  }, []);
+  useEffect(() => {
+    try {
+      localStorage.setItem(TEXT_KEY, JSON.stringify(textStyle));
+    } catch {}
+  }, [textStyle]);
+
+  const hasText = (s: Sticker) => !s.deco && !!s.recipe && recipeHasText(s.recipe);
+
+  async function applyText(scope: "selected" | "all") {
+    const pool = scope === "all" ? stickers : selected === GROUP ? groupMembers : sel ? [sel] : [];
+    const targets = pool.filter(hasText);
+    if (!targets.length) return setToast("Text style applies to Strava stickers.");
+    setRestyling(true);
+    try {
+      const updated = new Map(
+        await Promise.all(targets.map(async (s) => [s.id, await renderRecipe(s.recipe!, s.paint, textStyle)] as const)),
+      );
+      setStickers((list) =>
+        list.map((x) => {
+          const layer = updated.get(x.id);
+          if (!layer) return x;
+          if (!list.some((y) => y.id !== x.id && y.src === x.src)) URL.revokeObjectURL(x.src);
+          // Keep on-screen width, so bigger text shows as a relatively smaller route.
+          return { ...x, ...layer, scale: (x.scale * x.nw) / layer.nw, text: textStyle };
+        }),
+      );
+      setSheet(null);
+    } finally {
+      setRestyling(false);
+    }
+  }
+
   /** Average color of a small patch of the background photo under a screen point. */
   function sampleAt(p: Pt): string | null {
     const target = bgAt(p);
@@ -668,7 +717,7 @@ export default function Editor() {
       const updated = await Promise.all(
         targets.map(async (s, i) => {
           const paint = paintFor(routeColors, i, targets.length);
-          if (s.recipe) return { id: s.id, layer: await renderRecipe(s.recipe, paint), paint, original: undefined };
+          if (s.recipe) return { id: s.id, layer: await renderRecipe(s.recipe, paint, s.text), paint, original: undefined };
           const original = s.original ?? { src: s.src, img: s.img, nw: s.nw, nh: s.nh };
           return { id: s.id, layer: await recolorPixels(original.img, paint), paint, original };
         }),
@@ -706,7 +755,7 @@ export default function Editor() {
       const detail = res.ok ? ((await res.json()) as { activity: Activity }).activity : a;
       const old = recipeRun(target.recipe);
       const recipe = withRun(target.recipe, { ...detail, race: old?.race ? detail.race : false });
-      const layer = await renderRecipe(recipe, target.paint);
+      const layer = await renderRecipe(recipe, target.paint, target.text);
       setStickers((list) => {
         if (!list.some((x) => x.id !== target.id && x.src === target.src)) URL.revokeObjectURL(target.src);
         return list.map((x) =>
@@ -772,7 +821,7 @@ export default function Editor() {
     setEditBusy(true);
     try {
       const source = { ...editable.edit, ...editDraft };
-      const layer = await renderFinisherCard(source.run, source, editable.paint);
+      const layer = await renderFinisherCard(source.run, source, editable.paint, editable.text);
       const target = editable;
       setStickers((list) => {
         if (!list.some((x) => x.id !== target.id && x.src === target.src)) URL.revokeObjectURL(target.src);
@@ -1013,6 +1062,7 @@ export default function Editor() {
             <Tool label="Re-arrange" onClick={() => arrange(layout, opts, true, stickers, format, false)} icon={RefreshCw} />
             {editable && <Tool label="Edit card" onClick={openEdit} icon={PencilLine} />}
             <Tool label="Colors" onClick={() => setSheet("color")} icon={Palette} />
+            {groupMembers.some(hasText) && <Tool label="Text" onClick={() => setSheet("text")} icon={Type} />}
             <Tool label="Center" onClick={centerGroup} icon={Crosshair} />
             <Tool label="Layout" onClick={() => setSheet("layout")} icon={LayoutGrid} />
             {TUNABLE.includes(layout) && (
@@ -1027,6 +1077,7 @@ export default function Editor() {
             {runOf(sel) && <Tool label="Swap run" onClick={() => setSheet("swap")} icon={Replace} />}
             {sel.edit && <Tool label="Edit" onClick={openEdit} icon={PencilLine} />}
             {colorable(sel) && <Tool label="Color" onClick={() => setSheet("color")} icon={Palette} />}
+            {hasText(sel) && <Tool label="Text" onClick={() => setSheet("text")} icon={Type} />}
             <Tool label="Back" onClick={() => reorder(sel.id, -1)} icon={SendToBack} />
             <Tool label="Front" onClick={() => reorder(sel.id, 1)} icon={BringToFront} />
             <Tool
@@ -1044,6 +1095,7 @@ export default function Editor() {
             <Tool label="Stickers" onClick={() => stickerInput.current?.click()} icon={Plus} accent />
             <Tool label="Strava" onClick={() => setSheet("strava")} icon={Footprints} />
             {stickers.some(colorable) && <Tool label="Colors" onClick={() => setSheet("color")} icon={Palette} />}
+            {stickers.some(hasText) && <Tool label="Text" onClick={() => setSheet("text")} icon={Type} />}
             <Tool
               label="Layout"
               onClick={() => setSheet("layout")}
@@ -1369,7 +1421,7 @@ export default function Editor() {
 
       {sheet === "strava" && (
         <BottomSheet title="Strava" onClose={() => setSheet(null)}>
-          <StravaPanel hasWork={!empty} error={stravaError} onAdd={addLayers} onThenNow={addThenNow} routeColors={routeColors} />
+          <StravaPanel hasWork={!empty} error={stravaError} onAdd={addLayers} onThenNow={addThenNow} routeColors={routeColors} textStyle={textStyle} />
         </BottomSheet>
       )}
 
@@ -1439,7 +1491,7 @@ export default function Editor() {
             slot={colorSlot}
             onSlot={setColorSlot}
             canPick={!!(bg || bg2)}
-            onPickFromPhoto={() => (setSheet(null), setPicking(true))}
+            onPickFromPhoto={() => ((pickFor.current = "route"), setSheet(null), setPicking(true))}
             hasSelection={!!(selected === GROUP ? groupMembers.some(colorable) : sel && colorable(sel))}
             busy={recoloring}
             onApply={applyColors}
@@ -1447,10 +1499,24 @@ export default function Editor() {
         </BottomSheet>
       )}
 
+      {sheet === "text" && (
+        <BottomSheet title="Text style" onClose={() => setSheet(null)}>
+          <TextStyleSheet
+            value={textStyle}
+            onChange={setTextStyle}
+            canPick={!!(bg || bg2)}
+            onPickFromPhoto={() => ((pickFor.current = "text"), setSheet(null), setPicking(true))}
+            hasSelection={!!(selected === GROUP ? groupMembers.some(hasText) : sel && hasText(sel))}
+            busy={restyling}
+            onApply={applyText}
+          />
+        </BottomSheet>
+      )}
+
       {picking && (
         <div className="fixed inset-x-4 top-[max(env(safe-area-inset-top),12px)] z-[60] flex items-center justify-between gap-3 rounded-2xl bg-white px-4 py-3 text-sm font-medium text-black shadow-xl">
           <span>Tap your photo to pick a color</span>
-          <button onClick={() => (setPicking(false), setSheet("color"))} className="font-semibold text-[#fc4c02]">
+          <button onClick={() => (setPicking(false), setSheet(pickFor.current === "text" ? "text" : "color"))} className="font-semibold text-[#fc4c02]">
             Cancel
           </button>
         </div>

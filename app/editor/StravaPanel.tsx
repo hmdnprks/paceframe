@@ -27,6 +27,7 @@ import {
 import { honeyCols, type LayoutId, type LayoutOptions } from "./layouts";
 import CardOptions, { ToggleRow, type CardSettings } from "./CardOptions";
 import { paintFor, type Paint, type RouteStyle } from "./routeStyle";
+import type { TextStyle } from "./textStyle";
 import { isStandalone } from "./standalone";
 import type { loadImage, Split } from "./types";
 
@@ -35,6 +36,7 @@ type Layer = Awaited<ReturnType<typeof loadImage>> & {
   weight?: number;
   recipe?: Recipe;
   paint?: Paint;
+  text?: TextStyle;
   /** Generated without a route (goal, difference badge), so route colors never touch it. */
   noRoute?: boolean;
 };
@@ -148,6 +150,7 @@ export default function StravaPanel({
   onAdd,
   onThenNow,
   routeColors,
+  textStyle,
 }: {
   hasWork: boolean;
   error: string | null;
@@ -160,6 +163,8 @@ export default function StravaPanel({
   onThenNow: (layers: Layer[], split: Split, photos: (File | null)[]) => void;
   /** Route colors for new stickers (solid, gradient or multi-color). */
   routeColors: RouteStyle;
+  /** Text size, metrics layout, font and color for new stickers. */
+  textStyle: TextStyle;
 }) {
   const [athlete, setAthlete] = useState<Athlete | null | undefined>(undefined);
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -363,7 +368,7 @@ export default function StravaPanel({
     return Promise.all(
       recipes.map(async (r) => {
         const paint = paintFor(routeColors, Math.max(0, routed.indexOf(r)), routed.length);
-        return { ...(await renderRecipe(r, paint)), recipe: r, paint };
+        return { ...(await renderRecipe(r, paint, textStyle)), recipe: r, paint, text: textStyle };
       }),
     );
   }

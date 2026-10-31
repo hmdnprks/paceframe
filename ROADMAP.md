@@ -76,6 +76,7 @@ _Last updated: 2026-10-31_
   - Pick from 12 preset swatches and 8 gradient presets, the native color picker, a hex input, or **From photo** (tap the background photo to sample a color)
   - Apply to the selected sticker or group, or to all routes; new Strava stickers use the current colors; remembered per device
   - Strava stickers are re-drawn sharply from their recipe; gallery PNGs (e.g. saved from Strava) get their orange pixels recolored, always from the original
+- **Text style:** size S/M/L/XL (relative to the route), metrics layout **Row / Stack / Side** (route beside the stacked metrics), font (Geist, Bebas Neue, Oswald, Space Mono, Playfair), and color (presets, picker, hex, from photo); apply to the selection or all Strava stickers, remembered and used for new stickers; fonts load only when picked
 - **Split background:** one photo, **side by side**, or **top & bottom**, with a white divider; each half has its own photo that you pan and pinch separately; export clips each photo to its half at full quality
 - **km / miles** toggle
 
@@ -158,7 +159,7 @@ Ready-made story **styles**: one tap picks the runs, the stickers and the layout
 
 ### Stickers & design
 - **Sticker style presets:** Strava Classic, Minimal, Bold Block, Outline, Glass card
-- **Custom fonts:** a few curated display fonts (condensed, mono, serif)
+- ~~**Custom fonts**~~ ✅ shipped (Text style)
 - **Unit labels on or off**, label casing, value-only mode
 - **Text stickers:** free text (e.g. "Sub-25 5K!", "Week 12 of marathon block")
 - **Date range / summary sticker:** "Oct 2026 · 18 runs · 142 km" from the selected runs

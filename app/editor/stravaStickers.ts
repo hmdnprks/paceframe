@@ -1,5 +1,6 @@
 import type { Activity } from "@/app/lib/activity";
 import { DEFAULT_PAINT, mix, type Paint } from "./routeStyle";
+import { DEFAULT_TEXT, resolveText, type TextStyle } from "./textStyle";
 import { loadImage } from "./types";
 
 export type Units = "metric" | "imperial";
@@ -138,8 +139,7 @@ function routeCanvas(polyline: string, size = 1000, strokeRatio = 0.03, paint: P
   return c;
 }
 
-function textCanvas(lines: { text: string; size: number; weight: number; alpha: number }[]) {
-  const family = fontFamily();
+function textCanvas(lines: { text: string; size: number; weight: number; alpha: number }[], family = fontFamily(), color = "#fff") {
   const pad = 30;
   const gap = 6;
   const measure = document.createElement("canvas").getContext("2d")!;
@@ -153,7 +153,7 @@ function textCanvas(lines: { text: string; size: number; weight: number; alpha: 
   const ctx = c.getContext("2d")!;
   shadow(ctx);
   ctx.textBaseline = "top";
-  ctx.fillStyle = "#fff";
+  ctx.fillStyle = color;
   let y = pad;
   for (const l of lines) {
     ctx.font = `${l.weight} ${l.size}px ${family}`;
@@ -165,23 +165,37 @@ function textCanvas(lines: { text: string; size: number; weight: number; alpha: 
 }
 
 /** Render one sticker as a transparent PNG layer (sized for crisp export at full quality). */
-export async function renderStravaSticker(key: StickerKey, a: Activity, units: Units, paint: Paint = DEFAULT_PAINT) {
-  await document.fonts?.ready;
+export async function renderStravaSticker(
+  key: StickerKey,
+  a: Activity,
+  units: Units,
+  paint: Paint = DEFAULT_PAINT,
+  text: TextStyle = DEFAULT_TEXT,
+) {
   if (key === "route") return toLayer(routeCanvas(a.polyline!, 1000, 0.03, paint));
+  const t = await resolveText(text);
   if (key === "title") {
     return toLayer(
-      textCanvas([
-        { text: a.name, size: 84, weight: 800, alpha: 1 },
-        { text: formatDate(a.date), size: 44, weight: 500, alpha: 0.85 },
-      ]),
+      textCanvas(
+        [
+          { text: a.name, size: 84 * t.scale, weight: 800, alpha: 1 },
+          { text: formatDate(a.date), size: 44 * t.scale, weight: 500, alpha: 0.85 },
+        ],
+        t.family,
+        t.color,
+      ),
     );
   }
   const stat = statsFor(a, units).find((s) => s.key === key)!;
   return toLayer(
-    textCanvas([
-      { text: stat.label.toUpperCase(), size: 40, weight: 600, alpha: 0.85 },
-      { text: stat.value, size: 120, weight: 800, alpha: 1 },
-    ]),
+    textCanvas(
+      [
+        { text: stat.label.toUpperCase(), size: 40 * t.scale, weight: 600, alpha: 0.85 },
+        { text: stat.value, size: 120 * t.scale, weight: 800, alpha: 1 },
+      ],
+      t.family,
+      t.color,
+    ),
   );
 }
 
@@ -189,41 +203,94 @@ export async function renderStravaSticker(key: StickerKey, a: Activity, units: U
  * One sticker per run: route on top, chosen metrics in a centered grid below
  * (label over value, like Strava's share overlay), optional title + date on top.
  */
-export async function renderRunSticker(a: Activity, keys: Set<StickerKey>, units: Units, paint: Paint = DEFAULT_PAINT) {
-  await document.fonts?.ready;
-  const family = fontFamily();
-  const W = 1000;
+export async function renderRunSticker(
+  a: Activity,
+  keys: Set<StickerKey>,
+  units: Units,
+  paint: Paint = DEFAULT_PAINT,
+  text: TextStyle = DEFAULT_TEXT,
+) {
+  const t = await resolveText(text);
+  const family = t.family;
+  const k = t.scale;
   const stats = statsFor(a, units).filter((s) => keys.has(s.key) && s.key !== "route" && s.key !== "title");
-  const route = keys.has("route") && a.polyline ? routeCanvas(a.polyline, 900, 0.03, paint) : null;
   const title = keys.has("title");
-
-  const cols = stats.length <= 3 ? Math.max(1, stats.length) : stats.length === 4 ? 2 : 3;
-  const rows = Math.ceil(stats.length / cols);
-  const cellW = W / cols;
-  const labelSize = 38;
-  // Shrink values together so the widest one fits its cell.
+  const side = t.layout === "side" && stats.length > 0;
+  const route = keys.has("route") && a.polyline ? routeCanvas(a.polyline, side ? 640 : 900, side ? 0.04 : 0.03, paint) : null;
   const m = document.createElement("canvas").getContext("2d")!;
-  let valueSize = cols === 1 ? 130 : 96;
-  m.font = `800 ${valueSize}px ${family}`;
-  const widest = Math.max(0, ...stats.map((s) => m.measureText(s.value).width));
-  if (widest > cellW * 0.92) valueSize = Math.floor((valueSize * cellW * 0.92) / widest);
-  const cellH = labelSize * 1.2 + valueSize * 1.1 + 24;
+  const width = (text: string, size: number, weight = 800) => ((m.font = `${weight} ${size}px ${family}`), m.measureText(text).width);
 
   const pad = 30;
   const gap = 40;
-  const titleH = title ? 84 * 1.15 + 44 * 1.2 + gap : 0;
+  const labelSize = 38 * k;
   const raceH = a.race ? 64 + gap * 0.6 : 0;
-  const routeH = route ? Math.min(route.height, 900) : 0;
+  const titleSize = 84 * Math.min(k, 1.3);
+  const titleH = title ? titleSize * 1.15 + 44 * 1.2 + gap : 0;
+
+  // Metrics block size + how to draw it, per layout.
+  let blockW: number;
+  let blockH: number;
+  let drawStats: (ctx: CanvasRenderingContext2D, x: number, y: number) => void;
+  if (t.layout === "row") {
+    // Wider canvas for bigger text, so values don't have to shrink to fit their cells.
+    blockW = 1000 * Math.max(1, k * 0.9);
+    const cols = stats.length <= 3 ? Math.max(1, stats.length) : stats.length === 4 ? 2 : 3;
+    const rows = Math.ceil(stats.length / cols);
+    const cellW = blockW / cols;
+    let valueSize = (cols === 1 ? 130 : 96) * k;
+    const widest = Math.max(0, ...stats.map((s) => width(s.value, valueSize)));
+    if (widest > cellW * 0.92) valueSize = Math.floor((valueSize * cellW * 0.92) / widest);
+    const cellH = labelSize * 1.2 + valueSize * 1.1 + 24;
+    blockH = rows * cellH;
+    drawStats = (ctx, x, y) => {
+      ctx.textAlign = "center";
+      stats.forEach((s, i) => {
+        const row = Math.floor(i / cols);
+        const inRow = Math.min(cols, stats.length - row * cols);
+        const cx = x + (blockW - inRow * cellW) / 2 + ((i % cols) + 0.5) * cellW;
+        const top = y + row * cellH;
+        ctx.globalAlpha = 0.85;
+        ctx.font = `600 ${labelSize}px ${family}`;
+        ctx.fillText(s.label.toUpperCase(), cx, top, cellW * 0.95);
+        ctx.globalAlpha = 1;
+        ctx.font = `800 ${valueSize}px ${family}`;
+        ctx.fillText(s.value, cx, top + labelSize * 1.2, cellW * 0.95);
+      });
+    };
+  } else {
+    // One metric per line: label over value. Centered under the route, or left-aligned beside it.
+    const valueSize = (side ? 104 : 120) * k;
+    const lineH = labelSize * 1.2 + valueSize * 1.08 + 18 * k;
+    blockW = Math.max(...stats.map((s) => Math.max(width(s.value, valueSize), width(s.label.toUpperCase(), labelSize, 600))), 1);
+    blockH = stats.length * lineH;
+    drawStats = (ctx, x, y) => {
+      ctx.textAlign = side ? "left" : "center";
+      const tx = side ? x : x + blockW / 2;
+      stats.forEach((s, i) => {
+        const top = y + i * lineH;
+        ctx.globalAlpha = 0.85;
+        ctx.font = `600 ${labelSize}px ${family}`;
+        ctx.fillText(s.label.toUpperCase(), tx, top);
+        ctx.globalAlpha = 1;
+        ctx.font = `800 ${valueSize}px ${family}`;
+        ctx.fillText(s.value, tx, top + labelSize * 1.2);
+      });
+    };
+  }
+
+  const routeH = route ? Math.min(route.height, side ? 640 : 900) : 0;
   const routeW = route ? (route.width * routeH) / route.height : 0;
-  const statsH = rows * cellH;
+  const bodyW = side ? routeW + (route ? gap : 0) + blockW : Math.max(routeW, blockW);
+  const bodyH = side ? Math.max(routeH, blockH) : routeH + (route && stats.length ? gap : 0) + (stats.length ? blockH : 0);
+  const titleW = title ? Math.max(width(a.name, titleSize), width(formatDate(a.date), 44, 500)) : 0;
+  const W = Math.max(bodyW, Math.min(titleW, Math.max(bodyW, 1000)));
 
   const c = document.createElement("canvas");
-  c.width = W + pad * 2;
-  c.height = Math.ceil(pad * 2 + raceH + titleH + routeH + (route && stats.length ? gap : 0) + statsH);
+  c.width = Math.ceil(W + pad * 2);
+  c.height = Math.ceil(pad * 2 + raceH + titleH + bodyH);
   const ctx = c.getContext("2d")!;
   let y = pad;
 
-  ctx.textAlign = "center";
   ctx.textBaseline = "top";
   if (a.race) {
     racePill(ctx, c.width / 2, y, family);
@@ -231,38 +298,36 @@ export async function renderRunSticker(a: Activity, keys: Set<StickerKey>, units
   }
   if (title) {
     shadow(ctx);
-    ctx.fillStyle = "#fff";
-    ctx.font = `800 84px ${family}`;
+    ctx.textAlign = "center";
+    ctx.fillStyle = t.color;
+    ctx.font = `800 ${titleSize}px ${family}`;
     ctx.fillText(a.name, c.width / 2, y, W);
     ctx.globalAlpha = 0.85;
     ctx.font = `500 44px ${family}`;
-    ctx.fillText(formatDate(a.date), c.width / 2, y + 84 * 1.15, W);
+    ctx.fillText(formatDate(a.date), c.width / 2, y + titleSize * 1.15, W);
     ctx.globalAlpha = 1;
     y += titleH;
   }
 
-  if (route) {
-    ctx.shadowColor = "transparent";
-    ctx.drawImage(route, (c.width - routeW) / 2, y, routeW, routeH);
-    y += routeH + (stats.length ? gap : 0);
+  const left = (c.width - bodyW) / 2;
+  if (side) {
+    if (route) {
+      ctx.shadowColor = "transparent";
+      ctx.drawImage(route, left, y + (bodyH - routeH) / 2, routeW, routeH);
+    }
+    shadow(ctx);
+    ctx.fillStyle = t.color;
+    drawStats(ctx, left + (route ? routeW + gap : 0), y + (bodyH - blockH) / 2);
+  } else {
+    if (route) {
+      ctx.shadowColor = "transparent";
+      ctx.drawImage(route, (c.width - routeW) / 2, y, routeW, routeH);
+      y += routeH + (stats.length ? gap : 0);
+    }
+    shadow(ctx);
+    ctx.fillStyle = t.color;
+    drawStats(ctx, (c.width - blockW) / 2, y);
   }
-
-  shadow(ctx);
-  ctx.fillStyle = "#fff";
-  stats.forEach((s, i) => {
-    const row = Math.floor(i / cols);
-    const inRow = Math.min(cols, stats.length - row * cols);
-    const rowLeft = pad + (W - inRow * cellW) / 2;
-    const cx = rowLeft + ((i % cols) + 0.5) * cellW;
-    const top = y + row * cellH;
-    ctx.globalAlpha = 0.85;
-    ctx.font = `600 ${labelSize}px ${family}`;
-    ctx.fillText(s.label.toUpperCase(), cx, top, cellW * 0.95);
-    ctx.globalAlpha = 1;
-    ctx.font = `800 ${valueSize}px ${family}`;
-    ctx.fillText(s.value, cx, top + labelSize * 1.2, cellW * 0.95);
-  });
-
   return toLayer(c);
 }
 
@@ -315,9 +380,16 @@ const monthDay = (d: Date) => d.toLocaleDateString(undefined, { month: "short", 
  * One week of a training block: long-run route on the left, totals on the right. Race week gets a RACE pill;
  * `raceDetails` adds a short distance · time line (skip it when the race has its own finale sticker).
  */
-export async function renderWeekSticker(w: Week, units: Units, raceDetails = true, paint: Paint = DEFAULT_PAINT) {
-  await document.fonts?.ready;
-  const family = fontFamily();
+export async function renderWeekSticker(
+  w: Week,
+  units: Units,
+  raceDetails = true,
+  paint: Paint = DEFAULT_PAINT,
+  text: TextStyle = DEFAULT_TEXT,
+) {
+  const t = await resolveText(text);
+  const family = t.family;
+  const k = t.scale;
   const len = units === "metric" ? 1000 : 1609.344;
   const unit = units === "metric" ? "km" : "mi";
   const total = w.runs.reduce((s, r) => s + r.distance, 0);
@@ -331,13 +403,13 @@ export async function renderWeekSticker(w: Week, units: Units, raceDetails = tru
     ? `${monthDay(w.start)}–${w.end.getUTCDate()}`
     : `${monthDay(w.start)} – ${monthDay(w.end)}`;
   const lines: { text: string; size: number; weight: number; alpha: number; color?: string }[] = [
-    { text: `WEEK ${w.index} · ${range.toUpperCase()}`, size: 38, weight: 600, alpha: 0.85 },
-    { text: w.runs.length ? `${(total / len).toFixed(1)} ${unit}` : "Rest", size: 110, weight: 800, alpha: 1 },
+    { text: `WEEK ${w.index} · ${range.toUpperCase()}`, size: 38 * k, weight: 600, alpha: 0.85 },
+    { text: w.runs.length ? `${(total / len).toFixed(1)} ${unit}` : "Rest", size: 110 * k, weight: 800, alpha: 1 },
     {
       text: w.runs.length
         ? `${w.runs.length} run${w.runs.length > 1 ? "s" : ""} · long ${(long.distance / len).toFixed(1)} ${unit}`
         : "Recovery week",
-      size: 40,
+      size: 40 * k,
       weight: 500,
       alpha: 0.85,
     },
@@ -346,7 +418,7 @@ export async function renderWeekSticker(w: Week, units: Units, raceDetails = tru
     // No race name here: long names make this stop much wider than the others.
     lines.push({
       text: `Race · ${(race.distance / len).toFixed(2)} ${unit} · ${duration(race.movingTime)}`,
-      size: 40,
+      size: 40 * k,
       weight: 700,
       alpha: 1,
       color: ROUTE_COLOR,
@@ -387,7 +459,7 @@ export async function renderWeekSticker(w: Week, units: Units, raceDetails = tru
   for (const l of lines) {
     ctx.font = `${l.weight} ${l.size}px ${family}`;
     ctx.globalAlpha = l.alpha;
-    ctx.fillStyle = l.color ?? "#fff";
+    ctx.fillStyle = l.color ?? t.color;
     ctx.fillText(l.text, left, y);
     y += l.size * 1.15;
   }
@@ -493,9 +565,14 @@ export type FinisherSource = {
 };
 
 /** Finisher card: badges, race name + date, big finish time, route, and a stats row. */
-export async function renderFinisherCard(a: Activity, opts: Omit<FinisherSource, "kind" | "run">, paint: Paint = DEFAULT_PAINT) {
-  await document.fonts?.ready;
-  const family = fontFamily();
+export async function renderFinisherCard(
+  a: Activity,
+  opts: Omit<FinisherSource, "kind" | "run">,
+  paint: Paint = DEFAULT_PAINT,
+  text: TextStyle = DEFAULT_TEXT,
+) {
+  const t = await resolveText(text);
+  const family = t.family;
   const W = 1000;
   const pad = 40;
   const secs = resultSeconds(a, opts.time);
@@ -547,7 +624,7 @@ export async function renderFinisherCard(a: Activity, opts: Omit<FinisherSource,
   y += pillH + gap;
 
   shadow(ctx);
-  ctx.fillStyle = "#fff";
+  ctx.fillStyle = t.color;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
   ctx.font = `800 76px ${family}`;
@@ -740,9 +817,16 @@ const monthYear = (iso: string) =>
   new Date(iso).toLocaleDateString(undefined, { month: "short", year: "numeric", timeZone: "UTC" }).toUpperCase();
 
 /** THEN / NOW sticker: label + month, route, the compared value big, distance · time small. */
-export async function renderVersusSticker(a: Activity, role: "then" | "now", c: Compare, units: Units, paint: Paint = DEFAULT_PAINT) {
-  await document.fonts?.ready;
-  const family = fontFamily();
+export async function renderVersusSticker(
+  a: Activity,
+  role: "then" | "now",
+  c: Compare,
+  units: Units,
+  paint: Paint = DEFAULT_PAINT,
+  text: TextStyle = DEFAULT_TEXT,
+) {
+  const t = await resolveText(text);
+  const family = t.family;
   const W = 760;
   const pad = 30;
   const len = units === "metric" ? 1000 : 1609.344;
@@ -771,7 +855,7 @@ export async function renderVersusSticker(a: Activity, role: "then" | "now", c: 
   const rowX = cx - (pw + 18 + mw) / 2;
   pill(ctx, label, rowX, y, pillH, family, role === "now" ? ROUTE_COLOR : "rgba(255,255,255,0.22)", "#fff");
   shadow(ctx);
-  ctx.fillStyle = "#fff";
+  ctx.fillStyle = t.color;
   ctx.textBaseline = "middle";
   ctx.textAlign = "left";
   ctx.fillText(month, rowX + pw + 18, y + pillH / 2 + 2);
@@ -900,19 +984,22 @@ export function recipeHasRoute(r: Recipe) {
   }
 }
 
-export function renderRecipe(r: Recipe, paint: Paint = DEFAULT_PAINT) {
+export function renderRecipe(r: Recipe, paint: Paint = DEFAULT_PAINT, text: TextStyle = DEFAULT_TEXT) {
   switch (r.kind) {
     case "stat":
-      return renderStravaSticker(r.key, r.a, r.units, paint);
+      return renderStravaSticker(r.key, r.a, r.units, paint, text);
     case "run":
-      return renderRunSticker(r.a, new Set(r.keys), r.units, paint);
+      return renderRunSticker(r.a, new Set(r.keys), r.units, paint, text);
     case "routeOnly":
       return renderRouteOnly(r.a, paint);
     case "week":
-      return renderWeekSticker(r.w, r.units, r.raceDetails, paint);
+      return renderWeekSticker(r.w, r.units, r.raceDetails, paint, text);
     case "finisher":
-      return renderFinisherCard(r.source.run, r.source, paint);
+      return renderFinisherCard(r.source.run, r.source, paint, text);
     case "versus":
-      return renderVersusSticker(r.a, r.role, r.c, r.units, paint);
+      return renderVersusSticker(r.a, r.role, r.c, r.units, paint, text);
   }
 }
+
+/** Whether a text style change would affect the sticker. */
+export const recipeHasText = (r: Recipe) => r.kind !== "routeOnly" && !(r.kind === "stat" && r.key === "route");
