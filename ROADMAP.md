@@ -35,6 +35,8 @@ _Last updated: 2026-10-31_
 - Re-layout (e.g. changing columns) keeps the group where you placed it
 - **Edit one sticker inside a group:** double-tap it to select just that sticker (move, delete, recolor) without ungrouping; **Re-arrange** re-applies the layout to fill gaps
 - **Swap run:** replace the run in any Strava sticker with another run; it keeps its spot, size, design and color
+- **Add runs to a group:** only from the date range the group was made from (Random/Timeline range, or the span of the hand-picked runs); pick runs or add N random; new stickers copy the group's design, text style and color pattern. Scatter drops them into free spots without moving the others; other layouts re-arrange with them included
+- **Confirm prompts** before Ungroup and Group all
 
 ### Export
 - **Instagram size** (exact 1080 px) or **full photo quality** (keeps the photo's native resolution, up to the iOS canvas limit)

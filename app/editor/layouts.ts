@@ -368,6 +368,47 @@ function spiral(items: Box[], area: Rect, weights: number[] | undefined, bySize:
   return fitInto(items, out, area, true);
 }
 
+/**
+ * Drop new stickers into free spots among already placed ones (Scatter), without moving the existing ones.
+ * `scale` is the size each new sticker wants; it shrinks a little per attempt if the canvas is crowded.
+ * Returns null when they can't fit, so the caller can re-lay out everything instead.
+ */
+export function placeAmong(
+  placed: (Transform & Box)[],
+  items: Box[],
+  scales: number[],
+  W: number,
+  H: number,
+  rand = Math.random,
+): Transform[] | null {
+  const area = safeArea(W, H);
+  const gap = area.w * 0.015;
+  const taken = placed.map((p) => ({ x: p.x, y: p.y, ...extents(p, p.scale, p.rotation) }));
+  for (let attempt = 0, f = 1; attempt < 12; attempt++, f *= 0.9) {
+    const boxes = [...taken];
+    const out: Transform[] = [];
+    let ok = true;
+    for (let i = 0; i < items.length && ok; i++) {
+      const rotation = rand() * 24 - 12;
+      const scale = scales[i] * f;
+      const { ex, ey } = extents(items[i], scale, rotation);
+      let spot: { x: number; y: number } | null = null;
+      for (let tries = 0; tries < 600 && !spot; tries++) {
+        const x = area.x + ex + rand() * Math.max(0, area.w - ex * 2);
+        const y = area.y + ey + rand() * Math.max(0, area.h - ey * 2);
+        if (boxes.every((p) => Math.abs(p.x - x) >= p.ex + ex + gap || Math.abs(p.y - y) >= p.ey + ey + gap)) spot = { x, y };
+      }
+      if (!spot) ok = false;
+      else {
+        boxes.push({ ...spot, ex, ey });
+        out.push({ ...spot, scale, rotation });
+      }
+    }
+    if (ok) return out;
+  }
+  return null;
+}
+
 export function applyLayout(id: LayoutId, items: Box[], W: number, H: number, opts: LayoutOptions = {}): Transform[] {
   const rand = opts.rand ?? Math.random;
   const area = safeArea(W, H);

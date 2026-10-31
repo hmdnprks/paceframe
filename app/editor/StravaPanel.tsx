@@ -95,6 +95,11 @@ const MAX_RANDOM = 50;
 
 type Tool = "random" | "timeline" | "result" | "versus";
 
+/** Date window a batch of runs came from, so "Add runs" can offer more from the same range later. */
+export type RunSource = { after: number; before: number; label: string };
+
+const DAY_S = 86_400;
+
 /** Within ±15% distance, so a 5K isn't compared with a marathon. */
 const similarDistance = (a: Activity, b: Activity) => Math.abs(a.distance - b.distance) <= b.distance * 0.15;
 
@@ -158,7 +163,7 @@ export default function StravaPanel({
    * `perRow` = stickers per activity, so a grid can put one activity per row.
    * `layout` = apply this layout right away instead of asking.
    */
-  onAdd: (layers: Layer[], perRow?: number, layout?: LayoutId, layoutOpts?: Partial<LayoutOptions>) => void;
+  onAdd: (layers: Layer[], perRow?: number, layout?: LayoutId, layoutOpts?: Partial<LayoutOptions>, source?: RunSource) => void;
   /** Then vs Now: [then, now, badge] stickers, the background split, and optional photos per half. */
   onThenNow: (layers: Layer[], split: Split, photos: (File | null)[]) => void;
   /** Route colors for new stickers (solid, gradient or multi-color). */
@@ -542,8 +547,27 @@ export default function StravaPanel({
       return n;
     });
 
+  /** The range the selection came from: the searched range for Random/Timeline, else the picked runs' span. */
+  function selectionSource(): RunSource | undefined {
+    if (randomInfo || timelineInfo) {
+      const win = rangeWindow(range, from, to);
+      return win ? { ...win, label: rangeLabel } : undefined;
+    }
+    if (!selected.length) return undefined;
+    const dates = selected.map((a) => a.date).sort();
+    // Activity dates are local wall time; pad a day each side so time zones never cut runs off.
+    const first = Date.parse(dates[0]) / 1000;
+    const last = Date.parse(dates[dates.length - 1]) / 1000;
+    return {
+      after: Math.floor(first - DAY_S),
+      before: Math.ceil(last + DAY_S),
+      label: dates.length > 1 ? `${formatDate(dates[0])} – ${formatDate(dates[dates.length - 1])}` : formatDate(dates[0]),
+    };
+  }
+
   async function add() {
     setAdding(true);
+    const source = selectionSource();
     try {
       // Detail has the full-resolution route and calories. Skip it for big batches
       // so we stay well inside Strava's rate limits (summary routes are fine at sticker size).
@@ -561,7 +585,7 @@ export default function StravaPanel({
         const ordered = detailed.filter((a) => a !== hero).sort((a, b) => a.date.localeCompare(b.date));
         const recipes: Recipe[] = ordered.map((a) => ({ kind: "run", a: { ...a, race: false }, keys: [...keys], units }));
         if (hero) recipes.push(await heroRecipe(hero));
-        onAdd(await renderBatch(recipes), undefined, "timeline", { hero: !!hero });
+        onAdd(await renderBatch(recipes), undefined, "timeline", { hero: !!hero }, source);
         return;
       }
       if (mode === "routes") {
@@ -569,12 +593,12 @@ export default function StravaPanel({
         const runs = detailed.filter((a) => a.polyline).sort((a, b) => a.date.localeCompare(b.date));
         const rendered = await renderBatch(runs.map((a) => ({ kind: "routeOnly", a })));
         const layers = rendered.map((l, i) => ({ ...l, weight: runs[i].distance }));
-        if (routeStyle === "constellation") onAdd(layers, undefined, "honeycomb", { cols: honeyCols(layers.length) });
-        else onAdd(layers, undefined, "spiral", { bySize: true });
+        if (routeStyle === "constellation") onAdd(layers, undefined, "honeycomb", { cols: honeyCols(layers.length) }, source);
+        else onAdd(layers, undefined, "spiral", { bySize: true }, source);
         return;
       }
       if (mode === "combined") {
-        onAdd(await renderBatch(detailed.map((a) => ({ kind: "run", a, keys: [...keys], units }))));
+        onAdd(await renderBatch(detailed.map((a) => ({ kind: "run", a, keys: [...keys], units }))), undefined, undefined, undefined, source);
         return;
       }
       const layers = await renderBatch(

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { applyLayout, cascade, DEFAULT_BEND, defaultCols, honeyCols, LAYOUTS, MAX_COLS, TUNABLE, type LayoutId, type LayoutOptions } from "./layouts";
+import { applyLayout, cascade, DEFAULT_BEND, defaultCols, honeyCols, LAYOUTS, MAX_COLS, placeAmong, TUNABLE, type LayoutId, type LayoutOptions } from "./layouts";
 import { maxMultiplier, renderImage } from "./export";
 import StravaPanel from "./StravaPanel";
 import InstallPrompt from "./InstallPrompt";
@@ -11,6 +11,8 @@ import { recipeHasRoute, recipeHasText, recipeRun, renderFinisherCard, renderRec
 import TextStyleSheet from "./TextStyleSheet";
 import { DEFAULT_TEXT, type TextStyle } from "./textStyle";
 import SwapRun from "./SwapRun";
+import AddRuns from "./AddRuns";
+import type { RunSource } from "./StravaPanel";
 import type { Activity } from "@/app/lib/activity";
 import RouteColor from "./RouteColor";
 import { DEFAULT_STYLE, paintFor, recolorPixels, toHex, type RouteStyle } from "./routeStyle";
@@ -56,7 +58,7 @@ import { DIVIDER, FORMATS, loadImage, panes, uid, type Background, type Format, 
 type Target = "bg" | "bg2" | string;
 const isBg = (t: Target | null) => t === "bg" || t === "bg2";
 type Pt = { x: number; y: number };
-type Sheet = null | "layout" | "tune" | "export" | "format" | "strava" | "edit" | "photo" | "color" | "swap" | "text";
+type Sheet = null | "layout" | "tune" | "export" | "format" | "strava" | "edit" | "photo" | "color" | "swap" | "text" | "addRuns";
 
 const SNAP_PX = 10;
 const GROUP = "__group";
@@ -201,6 +203,11 @@ export default function Editor() {
     addLayers(await Promise.all([...files].map(loadImage)));
   }
 
+  // Date range the current Strava batch came from; "Add runs" only offers runs from it.
+  const [groupSource, setGroupSource] = useState<RunSource | null>(null);
+  // Action waiting for the user's OK (group / ungroup).
+  const [confirm, setConfirm] = useState<{ title: string; message: string; action: string; run: () => void } | null>(null);
+
   // Suggested grid columns for the last batch (e.g. one row per Strava activity).
   const [hintCols, setHintCols] = useState<number | null>(null);
 
@@ -209,8 +216,10 @@ export default function Editor() {
     perRow?: number,
     autoLayout?: LayoutId,
     layoutPatch: Partial<LayoutOptions> = {},
+    source?: RunSource,
   ) {
     setHintCols(perRow ?? null);
+    if (source) setGroupSource(source);
     setSheet(null);
     const placed = cascade(loaded, format.w, format.h, stickers.length);
     const added: Sticker[] = loaded.map((l, i) => ({ id: uid(), ...l, ...placed[i], opacity: 1 }));
@@ -743,6 +752,56 @@ export default function Editor() {
     }
   }
 
+  // ---- Add more runs to a group ----
+  // New stickers copy a group member's design (metrics, text style, size); weeks/cards/Then vs Now don't qualify.
+  const runTemplate = groupMembers.find((s) => s.recipe && recipeRun(s.recipe) && (s.recipe.kind === "run" || s.recipe.kind === "routeOnly"));
+  const [addingRuns, setAddingRuns] = useState(false);
+
+  async function addRunsToGroup(acts: Activity[]) {
+    const template = runTemplate;
+    if (!template?.recipe || !acts.length) return;
+    setAddingRuns(true);
+    try {
+      const existing = groupMembers.filter((s) => !s.deco);
+      const total = existing.length + acts.length;
+      const layers = await Promise.all(
+        acts.map(async (a, j) => {
+          const recipe = withRun(template.recipe!, { ...a, race: false });
+          // Continue the route color pattern (multi-color / gradient across runs) after the existing runs.
+          const paint = paintFor(routeColors, existing.length + j, total);
+          return { ...(await renderRecipe(recipe, paint, template.text)), recipe, paint, text: template.text };
+        }),
+      );
+      const width = template.nw * template.scale; // same on-screen size as the template
+      const fresh: Sticker[] = layers.map((l, i) => ({
+        id: uid(),
+        ...l,
+        x: format.w / 2,
+        y: format.h / 2,
+        scale: width / l.nw,
+        rotation: 0,
+        opacity: 1,
+        weight: template.weight !== undefined ? acts[i].distance : undefined,
+      }));
+      // Scatter: drop the new runs into free spots and leave the others where they are.
+      const spots = layout === "scatter" ? placeAmong(existing, fresh, fresh.map((f) => f.scale), format.w, format.h) : null;
+      if (spots) {
+        setStickers((list) => [...list, ...fresh.map((f, i) => ({ ...f, ...spots[i] }))]);
+        setGroupIds((ids) => [...ids, ...fresh.map((f) => f.id)]);
+        setSelected(GROUP);
+        setSheet(null);
+        return;
+      }
+      // Other layouts, or a scatter with no room left: lay everything out again with the new runs.
+      arrange(layout, opts, true, [...stickers, ...fresh], format, false);
+      if (layout !== "scatter") setToast(`Added ${acts.length} run${acts.length > 1 ? "s" : ""} and re-arranged the ${LAYOUTS.find((l) => l.id === layout)?.label ?? ""} layout.`);
+      else setToast("No free space left, so the scatter was re-arranged to fit everything.");
+      setSheet(null);
+    } finally {
+      setAddingRuns(false);
+    }
+  }
+
   // ---- Swap the run in a Strava sticker ----
   const runOf = (s: Sticker | null) => (s?.recipe ? recipeRun(s.recipe) : null);
   const [swapping, setSwapping] = useState(false);
@@ -1060,6 +1119,7 @@ export default function Editor() {
           <div className="-mx-3 flex items-center justify-between gap-1 overflow-x-auto px-3 [scrollbar-width:none]">
             <Tool label="Done" onClick={() => setSelected(null)} icon={Check} />
             <Tool label="Re-arrange" onClick={() => arrange(layout, opts, true, stickers, format, false)} icon={RefreshCw} />
+            {groupSource && runTemplate && <Tool label="Add runs" onClick={() => setSheet("addRuns")} icon={Plus} accent />}
             {editable && <Tool label="Edit card" onClick={openEdit} icon={PencilLine} />}
             <Tool label="Colors" onClick={() => setSheet("color")} icon={Palette} />
             {groupMembers.some(hasText) && <Tool label="Text" onClick={() => setSheet("text")} icon={Type} />}
@@ -1068,7 +1128,19 @@ export default function Editor() {
             {TUNABLE.includes(layout) && (
               <Tool label="Adjust" onClick={() => setSheet("tune")} icon={SlidersHorizontal} />
             )}
-            <Tool label="Ungroup" onClick={ungroup} icon={Ungroup} />
+            <Tool
+              label="Ungroup"
+              onClick={() =>
+                setConfirm({
+                  title: "Ungroup stickers?",
+                  message:
+                    "Each sticker will move on its own. Re-arrange, Add runs and layout changes only work on a group, but you can group them again anytime.",
+                  action: "Ungroup",
+                  run: ungroup,
+                })
+              }
+              icon={Ungroup}
+            />
           </div>
         ) : sel ? (
           <div className="-mx-3 flex items-center justify-between gap-1 overflow-x-auto px-3 [scrollbar-width:none]">
@@ -1105,7 +1177,16 @@ export default function Editor() {
             {stickers.length > 1 && (
               <Tool
                 label={grouped ? "Select group" : "Group all"}
-                onClick={groupAll}
+                onClick={() =>
+                  grouped
+                    ? groupAll()
+                    : setConfirm({
+                        title: "Group all stickers?",
+                        message: `All ${stickers.filter((s) => !s.deco).length} stickers will move together as one, including ones you placed by hand.`,
+                        action: "Group all",
+                        run: groupAll,
+                      })
+                }
                 icon={Group}
               />
             )}
@@ -1496,6 +1577,38 @@ export default function Editor() {
             busy={recoloring}
             onApply={applyColors}
           />
+        </BottomSheet>
+      )}
+
+      {sheet === "addRuns" && groupSource && runTemplate && (
+        <BottomSheet title={`Add runs to ${LAYOUTS.find((l) => l.id === layout)?.label ?? "group"}`} onClose={() => setSheet(null)}>
+          <AddRuns
+            source={groupSource}
+            exclude={stickers.map((s) => runOf(s)?.id).filter((x): x is number => x !== undefined)}
+            units={runTemplate.recipe && "units" in runTemplate.recipe ? runTemplate.recipe.units : "metric"}
+            busy={addingRuns}
+            onAdd={addRunsToGroup}
+          />
+        </BottomSheet>
+      )}
+
+      {confirm && (
+        <BottomSheet title={confirm.title} onClose={() => setConfirm(null)}>
+          <p className="mb-4 text-sm text-white/70">{confirm.message}</p>
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={() => setConfirm(null)} className="h-12 rounded-full bg-white/10 font-semibold">
+              Cancel
+            </button>
+            <button
+              onClick={() => {
+                confirm.run();
+                setConfirm(null);
+              }}
+              className="h-12 rounded-full bg-[#fc4c02] font-semibold active:brightness-90"
+            >
+              {confirm.action}
+            </button>
+          </div>
         </BottomSheet>
       )}
 
