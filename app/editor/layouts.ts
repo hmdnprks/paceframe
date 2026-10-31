@@ -289,7 +289,7 @@ function versus(items: Box[], W: number, H: number, split: Split): Transform[] {
   const [a, b, badge] = items;
   const out: Transform[] = [];
   if (split === "stacked") {
-    const badgeScale = badge ? fit(badge, W * 0.55, H * 0.07) : 0;
+    const badgeScale = badge ? fit(badge, W * 0.6, H * 0.1) : 0;
     const badgeH = badge ? badge.nh * badgeScale : 0;
     const topRoom = H / 2 - badgeH / 2 - gap - area.y;
     const bottomRoom = area.y + area.h - (H / 2 + badgeH / 2 + gap);
@@ -307,7 +307,7 @@ function versus(items: Box[], W: number, H: number, split: Split): Transform[] {
     out.push({ x: W / 4, y: bottom - (a.nh * sa) / 2, scale: sa, rotation: 0 });
     out.push({ x: (W * 3) / 4, y: bottom - (b.nh * sb) / 2, scale: sb, rotation: 0 });
     if (badge) {
-      const s = fit(badge, W * 0.6, H * 0.08);
+      const s = fit(badge, W * 0.62, H * 0.11);
       const top = bottom - Math.max(a.nh * sa, b.nh * sb);
       out.push({ x: W / 2, y: top - gap - (badge.nh * s) / 2, scale: s, rotation: 0 });
     }

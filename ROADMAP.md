@@ -77,6 +77,9 @@ _Last updated: 2026-10-31_
 - Next.js 16 App Router, React 19, Tailwind 4, TypeScript, lucide-react icons
 - No canvas or gesture libraries; all rendering is custom
 - LAN dev origins allowed for phone testing
+- **Installable PWA:** web app manifest, app icons (any + maskable + Apple touch icon), standalone full-screen, dark theme color
+  - Service worker: the editor works offline (cached app shell and build assets); Strava API calls always go to the network
+  - Install banner: native **Install** button on Android/Chrome, "Share → Add to Home Screen" how-to on iOS; dismissible
 
 ---
 
@@ -142,7 +145,7 @@ Ready-made story **styles**: one tap picks the runs, the stickers and the layout
 | **Remember last format & layout** | Fewer taps for repeat users |
 | **Auto-save the draft** (IndexedDB) | Don't lose work when the app reloads, including the Strava OAuth redirect |
 | **Deploy to Vercel + HTTPS domain** | Strava login on phones and the native share sheet both need it |
-| **"Add to Home Screen" PWA** (manifest, icon, offline shell) | Feels like a native app on iOS and Android |
+| ~~**"Add to Home Screen" PWA**~~ ✅ shipped (temporary icon until the real logo is ready) | Feels like a native app on iOS and Android |
 | **Empty-state polish:** hide "Choose a photo" once stickers exist | Avoid the label showing through stickers |
 
 ## 🧭 Soon (medium effort)
@@ -208,6 +211,7 @@ _Practical_
 - **Smart layout:** detect faces or subjects in the photo and keep stickers off them
 - **Friends & clubs:** club leaderboards, group run recaps (needs Strava capacity approval)
 - **Other sources:** Garmin Connect, Apple Health / HealthKit (native wrapper), GPX/FIT file upload
+- **Share target:** "Share → Paceframe" from Photos or Strava straight into the editor (Android; needs a service-worker POST handler)
 - **Native wrapper** (Capacitor) for direct "Share to Instagram Stories" with a sticker layer
 
 ---

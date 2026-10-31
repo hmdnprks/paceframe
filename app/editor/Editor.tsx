@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { applyLayout, cascade, DEFAULT_BEND, defaultCols, honeyCols, LAYOUTS, MAX_COLS, TUNABLE, type LayoutId, type LayoutOptions } from "./layouts";
 import { maxMultiplier, renderImage } from "./export";
 import StravaPanel from "./StravaPanel";
+import InstallPrompt from "./InstallPrompt";
 import CardOptions, { type CardSettings } from "./CardOptions";
 import { renderFinisherCard } from "./stravaStickers";
 import { pathLine, shapeSilhouette, timelineLine } from "./decorations";
@@ -219,12 +220,14 @@ export default function Editor() {
   }
 
   function changeFormat(f: Format) {
-    const sx = f.w / format.w;
-    const sy = f.h / format.h;
-    setStickers((s) => s.map((st) => ({ ...st, x: st.x * sx, y: st.y * sy })));
     setSplit(split, f);
     setFormat(f);
     setSheet(null);
+    // A laid-out group is re-laid out for the new size; squeezing positions alone makes stickers overlap.
+    if (grouped) return arrange(layout, opts, false, stickers, f, false);
+    const sx = f.w / format.w;
+    const sy = f.h / format.h;
+    setStickers((s) => s.map((st) => ({ ...st, x: st.x * sx, y: st.y * sy })));
   }
 
   // Last applied layout and its tunable options (columns, arc bend, tilt).
@@ -253,11 +256,11 @@ export default function Editor() {
   // Ignores stale async decorations when the layout changes quickly (e.g. tapping through options).
   const decoRun = useRef(0);
 
-  function arrange(id: LayoutId, o = opts, keepCenter = false, base = stickers) {
+  function arrange(id: LayoutId, o = opts, keepCenter = false, base = stickers, f = format, openTune = true) {
     // Layout decorations (timeline line) are rebuilt for every arrangement.
     base.filter((s) => s.deco).forEach((s) => URL.revokeObjectURL(s.src));
     const items = base.filter((s) => !s.deco);
-    const t = applyLayout(id, items, format.w, format.h, { ...o, weights: items.map((s) => s.weight ?? 0) });
+    const t = applyLayout(id, items, f.w, f.h, { ...o, weights: items.map((s) => s.weight ?? 0) });
     let next = items.map((st, i) => ({ ...st, ...t[i] }));
     let dx = 0;
     let dy = 0;
@@ -274,14 +277,14 @@ export default function Editor() {
     setGroupIds(next.map((st) => st.id));
     setSelected(GROUP);
     setLayout(id);
-    setSheet(TUNABLE.includes(id) ? "tune" : null);
+    if (openTune) setSheet(TUNABLE.includes(id) ? "tune" : null);
 
     const run = ++decoRun.current;
     const deco =
       id === "timeline" && next.length > 1
-        ? timelineLine(next.length, format, o, dx, dy)
+        ? timelineLine(next.length, f, o, dx, dy)
         : id === "shape" && o.mask && o.silhouette
-          ? shapeSilhouette(o.mask, format, dx, dy)
+          ? shapeSilhouette(o.mask, f, dx, dy)
           : id === "spiral" && o.path && next.length > 2
             ? pathLine(next.map((s) => ({ x: s.x, y: s.y })))
             : null;
@@ -911,6 +914,8 @@ export default function Editor() {
         className="sr-only"
         onChange={(e) => (onStickers(e.target.files), (e.target.value = ""))}
       />
+
+      <InstallPrompt />
 
       {toast && (
         <div className="fixed inset-x-4 top-[max(env(safe-area-inset-top),12px)] z-[60] rounded-2xl bg-white px-4 py-3 text-sm font-medium text-black shadow-xl">

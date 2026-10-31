@@ -697,7 +697,25 @@ export function compareDelta(then: Activity, now: Activity, c: Compare, units: U
     headline: same ? "Same" : headline,
     detail: same ? "no change" : `${pct}% ${words[c][improved ? 0 : 1]}`,
     improved: !same && improved,
+    secondary: secondaryDelta(then, now, c, units),
   };
+}
+
+/**
+ * The other half of the story: total time change when comparing pace or HR, pace change when comparing
+ * time. Skipped for distance (different distances make time meaningless).
+ */
+function secondaryDelta(then: Activity, now: Activity, c: Compare, units: Units): string | null {
+  if (c === "distance") return null;
+  const other: Compare = c === "time" ? "pace" : "time";
+  const diff = compareValue(now, other, units).raw - compareValue(then, other, units).raw;
+  if (Math.abs(diff) < 0.5) return other === "time" ? "Same total time" : "Same pace";
+  const sign = diff < 0 ? "−" : "+";
+  const unit = units === "metric" ? "km" : "mi";
+  const text = other === "time" ? `${sign}${duration(Math.abs(diff))} total time` : `${sign}${duration(Math.abs(diff))} /${unit} pace`;
+  // Total time only compares fairly over (nearly) the same distance.
+  const differentDistance = Math.abs(now.distance - then.distance) > then.distance * 0.02;
+  return other === "time" && differentDistance ? `${text} · different distances` : text;
 }
 
 const monthYear = (iso: string) =>
@@ -721,7 +739,7 @@ export async function renderVersusSticker(a: Activity, role: "then" | "now", c: 
 
   const c2 = document.createElement("canvas");
   c2.width = W + pad * 2;
-  c2.height = Math.ceil(pad * 2 + pillH + gap + (route ? routeH + gap : 0) + 36 * 1.2 + 120 * 1.05 + 44 * 1.3);
+  c2.height = Math.ceil(pad * 2 + pillH + gap + (route ? routeH + gap : 0) + 36 * 1.2 + 120 * 1.18 + 44 * 1.3);
   const ctx = c2.getContext("2d")!;
   const cx = c2.width / 2;
   let y = pad;
@@ -758,7 +776,7 @@ export async function renderVersusSticker(a: Activity, role: "then" | "now", c: 
   ctx.globalAlpha = 1;
   ctx.font = `800 120px ${family}`;
   ctx.fillText(value.text, cx, y, W);
-  y += 120 * 1.05;
+  y += 120 * 1.18;
   ctx.globalAlpha = 0.85;
   ctx.font = `500 44px ${family}`;
   ctx.fillText(sub, cx, y, W);
@@ -775,10 +793,13 @@ export async function renderDeltaSticker(then: Activity, now: Activity, c: Compa
   const hw = m.measureText(d.headline).width;
   m.font = `700 46px ${family}`;
   const dw = m.measureText(d.detail.toUpperCase()).width;
+  m.font = `800 56px ${family}`;
+  const sw = d.secondary ? m.measureText(d.secondary).width : 0;
   const padX = 60;
   const padY = 34;
-  const w = Math.max(hw, dw) + padX * 2;
-  const h = padY * 2 + 110 + 12 + 46;
+  const secondH = d.secondary ? 24 + 4 + 56 : 0; // divider gap + line
+  const w = Math.max(hw, dw, sw) + padX * 2;
+  const h = padY * 2 + 110 + 12 + 46 + secondH;
   const c2 = document.createElement("canvas");
   c2.width = Math.ceil(w + 20);
   c2.height = Math.ceil(h + 20);
@@ -798,6 +819,15 @@ export async function renderDeltaSticker(then: Activity, now: Activity, c: Compa
   ctx.globalAlpha = 0.9;
   ctx.font = `700 46px ${family}`;
   ctx.fillText(d.detail.toUpperCase(), c2.width / 2, 10 + padY + 110 + 12);
+  if (d.secondary) {
+    // Thin divider, then the overall change (total time, or pace when comparing time).
+    const lineY = 10 + padY + 110 + 12 + 46 + 14;
+    ctx.globalAlpha = 0.35;
+    ctx.fillRect(10 + padX, lineY, w - padX * 2, 4);
+    ctx.globalAlpha = 1;
+    ctx.font = `800 56px ${family}`;
+    ctx.fillText(d.secondary, c2.width / 2, lineY + 14);
+  }
   return toLayer(c2);
 }
 

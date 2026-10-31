@@ -901,6 +901,7 @@ export default function StravaPanel({
           {thenRun && nowRun && delta && (
             <p className={`mb-3 text-sm font-bold ${delta.improved ? "text-[#fc4c02]" : "text-white/60"}`}>
               {delta.headline} · {delta.detail}
+              {delta.secondary && <span className="block text-xs font-semibold opacity-80">{delta.secondary}</span>}
               {!similarDistance(thenRun, nowRun) && compare !== "distance" && (
                 <span className="block text-[11px] font-medium text-white/40">Tip: runs of a similar distance compare more fairly.</span>
               )}
