@@ -1,23 +1,37 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronLeft, ChevronRight, Dices, Flag, Milestone, Minus, Plus, RefreshCw, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, ChevronLeft, ChevronRight, Dices, Flag, GitCompareArrows, ImagePlus, Milestone, Minus, Plus, RefreshCw, Trophy, X } from "lucide-react";
 import type { Activity } from "@/app/lib/activity";
 import {
   buildWeeks,
   decodePolyline,
+  duration as formatClock,
   formatDate,
   renderRunSticker,
   renderStravaSticker,
+  COMPARES,
+  compareDelta,
+  compareValue,
+  renderDeltaSticker,
+  renderFinisherCard,
+  renderRouteOnly,
+  renderVersusSticker,
+  type Compare,
+  renderGoalSticker,
   renderWeekSticker,
+  resultSeconds,
   statsFor,
+  defaultCardMetrics,
+  type FinisherSource,
   type StickerKey,
   type Units,
 } from "./stravaStickers";
-import type { LayoutId, LayoutOptions } from "./layouts";
-import type { loadImage } from "./types";
+import { honeyCols, type LayoutId, type LayoutOptions } from "./layouts";
+import CardOptions, { ToggleRow, type CardSettings } from "./CardOptions";
+import type { loadImage, Split } from "./types";
 
-type Layer = Awaited<ReturnType<typeof loadImage>>;
+type Layer = Awaited<ReturnType<typeof loadImage>> & { edit?: FinisherSource; weight?: number };
 type Athlete = { id: number; firstname: string; lastname: string; profile: string };
 
 const ERRORS: Record<string, string> = {
@@ -70,6 +84,11 @@ function rangeWindow(range: RangeId, from: string, to: string) {
 
 const MAX_RANDOM = 50;
 
+type Tool = "random" | "timeline" | "result" | "versus";
+
+/** Within ±15% distance, so a 5K isn't compared with a marathon. */
+const similarDistance = (a: Activity, b: Activity) => Math.abs(a.distance - b.distance) <= b.distance * 0.15;
+
 function shuffle<T>(list: T[]) {
   const a = [...list];
   for (let i = a.length - 1; i > 0; i--) {
@@ -81,7 +100,7 @@ function shuffle<T>(list: T[]) {
 
 const unitLen = (u: Units) => (u === "metric" ? 1000 : 1609.344);
 
-type Mode = "combined" | "separate";
+type Mode = "combined" | "separate" | "routes";
 type Settings = { keys: StickerKey[]; units: Units; mode: Mode };
 
 const SETTINGS_KEY = "paceframe:strava-settings";
@@ -120,6 +139,7 @@ export default function StravaPanel({
   hasWork,
   error,
   onAdd,
+  onThenNow,
 }: {
   hasWork: boolean;
   error: string | null;
@@ -128,6 +148,8 @@ export default function StravaPanel({
    * `layout` = apply this layout right away instead of asking.
    */
   onAdd: (layers: Layer[], perRow?: number, layout?: LayoutId, layoutOpts?: Partial<LayoutOptions>) => void;
+  /** Then vs Now: [then, now, badge] stickers, the background split, and optional photos per half. */
+  onThenNow: (layers: Layer[], split: Split, photos: (File | null)[]) => void;
 }) {
   const [athlete, setAthlete] = useState<Athlete | null | undefined>(undefined);
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -142,12 +164,14 @@ export default function StravaPanel({
   const [step, setStep] = useState<"pick" | "stickers">("pick");
   const [keys, setKeys] = useState<Set<StickerKey>>(() => new Set(initial.keys));
   const [mode, setMode] = useState<Mode>(initial.mode);
+  // Routes-only arrangement: a honeycomb "constellation" or a spiral (oldest in the center).
+  const [routeStyle, setRouteStyle] = useState<"constellation" | "spiral">("constellation");
   useEffect(() => saveSettings({ keys: [...keys], units, mode }), [keys, units, mode]);
   const [adding, setAdding] = useState(false);
   const [message, setMessage] = useState(error ? (ERRORS[error] ?? `Strava error: ${error}`) : null);
 
   // Random pick: N runs from a date range (respects the distance filter).
-  const [randomOpen, setRandomOpen] = useState(false);
+  const [tool, setTool] = useState<Tool | null>(null);
   const [randomCount, setRandomCount] = useState(5);
   const [range, setRange] = useState<RangeId>("3");
   const [from, setFrom] = useState(() => {
@@ -161,10 +185,31 @@ export default function StravaPanel({
   const [randomInfo, setRandomInfo] = useState<string | null>(null);
 
   // Training timeline: a date range as one stop per week (or per run), in order.
-  const [timelineOpen, setTimelineOpen] = useState(false);
   const [groupBy, setGroupBy] = useState<"week" | "run">("week");
   const [building, setBuilding] = useState(false);
   const [timelineInfo, setTimelineInfo] = useState<string | null>(null);
+  // Race result: finisher card and/or goal vs actual for one run.
+  const [resultId, setResultId] = useState<number | null>(null);
+  // Card metrics are null until the user changes them, so each race gets sensible defaults.
+  const [card, setCard] = useState<{ time: CardSettings["time"]; pr: boolean; metrics: CardSettings["metrics"] | null }>({
+    time: "elapsed",
+    pr: false,
+    metrics: null,
+  });
+  const [goal, setGoal] = useState({ h: "", m: "", s: "" });
+  const [withCard, setWithCard] = useState(true);
+  const [withGoal, setWithGoal] = useState(true);
+
+  // Then vs Now: two runs, what to compare, background split and optional photos.
+  const [thenId, setThenId] = useState<number | null>(null);
+  const [nowId, setNowId] = useState<number | null>(null);
+  const [vsSlot, setVsSlot] = useState<"then" | "now">("then");
+  const [compare, setCompare] = useState<Compare>("pace");
+  const [vsSplit, setVsSplit] = useState<Split>("side");
+  const [vsPhotos, setVsPhotos] = useState<(File | null)[]>([null, null]);
+  const vsPhotoInput = useRef<HTMLInputElement>(null);
+  const vsPhotoSlot = useRef(0);
+
   // Race finale: "auto" = latest run marked as Race in Strava, a run id, or null for none.
   const [heroChoice, setHeroChoice] = useState<number | "auto" | null>("auto");
   const [heroPicking, setHeroPicking] = useState(false);
@@ -214,13 +259,13 @@ export default function StravaPanel({
   }
 
   /** All runs in the chosen date range (cached per range). */
-  async function loadPool() {
-    const win = rangeWindow(range, from, to);
+  async function loadPool(r: RangeId = range) {
+    const win = rangeWindow(r, from, to);
     if (!win) {
       setMessage("Pick a valid date range (start before end).");
       return null;
     }
-    const key = `${range}|${range === "custom" ? `${from}|${to}` : ""}`;
+    const key = `${r}|${r === "custom" ? `${from}|${to}` : ""}`;
     if (pool?.key === key) return pool;
     const res = await fetch(`/api/strava/runs?after=${Math.floor(win.after)}&before=${Math.floor(win.before)}`);
     if (res.status === 401) {
@@ -254,7 +299,7 @@ export default function StravaPanel({
       setRandomInfo(
         `${picked.length} random of ${eligible.length} runs · ${rangeLabel}${r.min > 0 || r.max < Infinity ? ` · ${r.label}` : ""}${current.truncated ? " (first 1000 activities)" : ""}`,
       );
-      setRandomOpen(false);
+      setTool(null);
       setStep("stickers");
     } finally {
       setRolling(false);
@@ -281,6 +326,91 @@ export default function StravaPanel({
     setBuilding(true);
     try {
       if (await loadPool()) setHeroPicking(true);
+    } finally {
+      setBuilding(false);
+    }
+  }
+
+  // Likely races first: Strava-marked races, then the longest runs.
+  const byRaceLikelihood = (list: Activity[]) =>
+    [...list].sort((a, b) => Number(!!b.race) - Number(!!a.race) || b.distance - a.distance).slice(0, 15);
+
+  const resultRun = activities.find((a) => a.id === resultId) ?? null;
+  const cardSettings: CardSettings | null = resultRun
+    ? { time: card.time, pr: card.pr, metrics: card.metrics ?? defaultCardMetrics(resultRun) }
+    : null;
+  const goalSecs = (Number(goal.h) || 0) * 3600 + (Number(goal.m) || 0) * 60 + (Number(goal.s) || 0);
+
+  // Runs from the searched range plus the loaded list, newest first.
+  const vsRuns = [...new Map([...(pool?.runs ?? []), ...activities].map((a) => [a.id, a])).values()].sort((a, b) =>
+    b.date.localeCompare(a.date),
+  );
+  const thenRun = vsRuns.find((a) => a.id === thenId) ?? null;
+  const nowRun = vsRuns.find((a) => a.id === nowId) ?? null;
+  // For "then", suggest runs of a similar distance to "now", oldest first.
+  const vsCandidates =
+    vsSlot === "now" || !nowRun
+      ? vsRuns
+      : [...vsRuns].sort((a, b) => Number(similarDistance(b, nowRun)) - Number(similarDistance(a, nowRun)) || a.date.localeCompare(b.date));
+  const delta = thenRun && nowRun ? compareDelta(thenRun, nowRun, compare, units) : null;
+
+  async function openVersus() {
+    // A year back gives "then" something to compare against.
+    const r: RangeId = range === "custom" ? "custom" : "12";
+    setRange(r);
+    setBuilding(true);
+    try {
+      const p = await loadPool(r);
+      const runs = [...(p?.runs ?? []), ...activities].sort((a, b) => b.date.localeCompare(a.date));
+      const now = runs.find((a) => a.id === (selectedIds.length === 1 ? selectedIds[0] : -1)) ?? runs[0];
+      if (!now) return;
+      const older = runs.filter((a) => a.id !== now.id && a.date < now.date);
+      const then = [...older].reverse().find((a) => similarDistance(a, now)) ?? older[older.length - 1];
+      setNowId(now.id);
+      setThenId(then?.id ?? null);
+      setVsSlot("then");
+    } finally {
+      setBuilding(false);
+    }
+  }
+
+  async function createVersus() {
+    if (!thenRun || !nowRun) return;
+    setBuilding(true);
+    try {
+      const layers = await Promise.all([
+        renderVersusSticker(thenRun, "then", compare, units),
+        renderVersusSticker(nowRun, "now", compare, units),
+        renderDeltaSticker(thenRun, nowRun, compare, units),
+      ]);
+      onThenNow(layers, vsSplit, vsSplit === "none" ? [null, null] : vsPhotos);
+    } finally {
+      setBuilding(false);
+    }
+  }
+
+  function toggleTool(t: Tool) {
+    setTool((cur) => (cur === t ? null : t));
+    if (t === "versus" && tool !== "versus") openVersus();
+    // Race result defaults to the run selected in the grid, else the most likely race.
+    if (t === "result" && tool !== "result") {
+      if (selectedIds.length === 1) setResultId(selectedIds[0]);
+      else if (!resultRun) setResultId(byRaceLikelihood(activities)[0]?.id ?? null);
+    }
+  }
+
+  async function createResult() {
+    if (!resultRun) return;
+    setBuilding(true);
+    try {
+      const res = await fetch(`/api/strava/activities/${resultRun.id}`);
+      const run = res.ok ? ((await res.json()) as { activity: Activity }).activity : resultRun;
+      const settings = { ...cardSettings!, units };
+      const layers: Layer[] = [];
+      if (withCard) layers.push({ ...(await renderFinisherCard(run, settings)), edit: { kind: "finisher", run, ...settings } });
+      if (withGoal && goalSecs > 0) layers.push(await renderGoalSticker(goalSecs, resultSeconds(run, settings.time)));
+      if (!layers.length) return setMessage("Turn on the finisher card, or enter a goal time.");
+      onAdd(layers, undefined, layers.length > 1 ? "stack" : undefined);
     } finally {
       setBuilding(false);
     }
@@ -318,7 +448,7 @@ export default function StravaPanel({
       setTimelineInfo(
         `${eligible.length} runs, oldest first${hero ? ` · finale: ${hero.name}` : ""} · ${rangeLabel}${eligible.length > 30 ? " · tip: Weeks reads better with this many" : ""}`,
       );
-      setTimelineOpen(false);
+      setTool(null);
       setStep("stickers");
     } finally {
       setBuilding(false);
@@ -367,6 +497,14 @@ export default function StravaPanel({
         const layers = await Promise.all(ordered.map((a) => renderRunSticker({ ...a, race: false }, keys, units)));
         if (hero) layers.push(await renderHero(hero));
         onAdd(layers, undefined, "timeline", { hero: !!hero });
+        return;
+      }
+      if (mode === "routes") {
+        // Oldest first, so a spiral starts in the center; distance lets the spiral size by run length.
+        const runs = detailed.filter((a) => a.polyline).sort((a, b) => a.date.localeCompare(b.date));
+        const layers = await Promise.all(runs.map(async (a) => ({ ...(await renderRouteOnly(a)), weight: a.distance })));
+        if (routeStyle === "constellation") onAdd(layers, undefined, "honeycomb", { cols: honeyCols(layers.length) });
+        else onAdd(layers, undefined, "spiral", { bySize: true });
         return;
       }
       if (mode === "combined") {
@@ -482,7 +620,9 @@ export default function StravaPanel({
 
   if (step === "stickers") {
     const total =
-      mode === "combined" || timelineInfo
+      mode === "routes" && !timelineInfo
+        ? selected.filter((a) => a.polyline).length
+        : mode === "combined" || timelineInfo
         ? selected.length
         : selected.reduce((n, a) => n + statsFor(a, units).filter((s) => keys.has(s.key)).length, 0);
     return (
@@ -539,8 +679,9 @@ export default function StravaPanel({
         <div className="mb-3 flex rounded-xl bg-white/5 p-1 text-sm">
           {(
             [
-              ["combined", "One sticker per run", "Route + metrics together"],
-              ["separate", "Separate stickers", "Each metric on its own"],
+              ["combined", "Per run", "Route + metrics together"],
+              ["separate", "Separate", "Each metric on its own"],
+              ["routes", "Routes only", "Constellation or spiral"],
             ] as const
           ).map(([m, label, hint]) => (
             <button
@@ -555,6 +696,28 @@ export default function StravaPanel({
         </div>
         )}
 
+        {mode === "routes" && !timelineInfo ? (
+          <div className="grid grid-cols-2 gap-2">
+            {(
+              [
+                ["constellation", "Constellation", "Routes in a honeycomb pattern"],
+                ["spiral", "Spiral", "Oldest in the center, longer runs bigger"],
+              ] as const
+            ).map(([st, label, hint]) => (
+              <button
+                key={st}
+                onClick={() => setRouteStyle(st)}
+                className={`rounded-xl p-3 text-left ${routeStyle === st ? "bg-white/15 ring-2 ring-[#fc4c02]" : "bg-white/5"}`}
+              >
+                <div className="font-semibold">{label}</div>
+                <div className="text-[11px] text-white/50">{hint}</div>
+              </button>
+            ))}
+            {selected.some((a) => !a.polyline) && (
+              <p className="col-span-2 text-[11px] text-white/40">Runs without GPS (e.g. treadmill) are skipped.</p>
+            )}
+          </div>
+        ) : (
         <div className="flex flex-col gap-1.5">
           {kinds.map(({ key, count }) => {
             const on = keys.has(key);
@@ -586,11 +749,12 @@ export default function StravaPanel({
             );
           })}
         </div>
+        )}
 
         <div className="sticky bottom-0 -mx-4 mt-4 bg-[#18181b] px-4 pt-2">
           <button
             onClick={add}
-            disabled={adding || keys.size === 0}
+            disabled={adding || (mode === "routes" && !timelineInfo ? total === 0 : keys.size === 0)}
             className="h-12 w-full rounded-full bg-[#fc4c02] font-semibold active:brightness-90 disabled:opacity-40"
           >
             {adding ? "Creating stickers…" : total ? `Add ${total} sticker${total === 1 ? "" : "s"}` : "Add stickers"}
@@ -619,6 +783,22 @@ export default function StravaPanel({
         </button>
       </div>
 
+      {visible.length > 1 && (
+        <div className="mb-2 flex justify-end">
+          <button
+            onClick={() => {
+              setRandomInfo(null);
+              setTimelineInfo(null);
+              setTimelineHeroId(null);
+              setSelectedIds((ids) => [...ids, ...visible.map((a) => a.id).filter((id) => !ids.includes(id))]);
+            }}
+            className="text-xs font-semibold text-[#fc4c02]"
+          >
+            Select all shown ({visible.length})
+          </button>
+        </div>
+      )}
+
       {/* Distance filter */}
       <div className="-mx-4 mb-3 flex gap-2 overflow-x-auto px-4 [scrollbar-width:none]">
         {FILTERS[units].map((f, i) => (
@@ -632,24 +812,226 @@ export default function StravaPanel({
         ))}
       </div>
 
-      <div className="mb-3 grid grid-cols-2 gap-2">
-        <button
-          onClick={() => (setRandomOpen((o) => !o), setTimelineOpen(false))}
-          className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold ${randomOpen ? "bg-white text-black" : "bg-white/10"}`}
-        >
-          <Dices size={18} />
-          Random runs
-        </button>
-        <button
-          onClick={() => (setTimelineOpen((o) => !o), setRandomOpen(false))}
-          className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold ${timelineOpen ? "bg-white text-black" : "bg-white/10"}`}
-        >
-          <Milestone size={18} />
-          Training timeline
-        </button>
+      <div className="mb-3 grid grid-cols-4 gap-2">
+        {(
+          [
+            ["random", "Random", Dices],
+            ["timeline", "Timeline", Milestone],
+            ["result", "Race result", Trophy],
+            ["versus", "Then vs Now", GitCompareArrows],
+          ] as const
+        ).map(([t, label, Glyph]) => (
+          <button
+            key={t}
+            onClick={() => toggleTool(t)}
+            className={`flex h-14 flex-col items-center justify-center gap-1 rounded-xl text-[11px] leading-tight font-semibold ${tool === t ? "bg-white text-black" : "bg-white/10"}`}
+          >
+            <Glyph size={18} />
+            {label}
+          </button>
+        ))}
       </div>
 
-      {timelineOpen && (
+      {tool === "versus" && (
+        <div className="mb-4 rounded-2xl bg-white/5 p-3">
+          <p className="mb-3 text-xs text-white/60">Show how far you&apos;ve come: an older run against a recent one, with the difference.</p>
+          {rangePicker}
+          <button
+            onClick={openVersus}
+            disabled={building}
+            className="mb-3 h-10 w-full rounded-xl bg-white/10 text-sm font-semibold disabled:opacity-40"
+          >
+            {building ? "Searching…" : "Search runs in this range"}
+          </button>
+
+          {/* Then / Now slots: tap one, then pick its run below. */}
+          <div className="mb-2 grid grid-cols-2 gap-2">
+            {(
+              [
+                ["then", "THEN", thenRun],
+                ["now", "NOW", nowRun],
+              ] as const
+            ).map(([slot, label, run]) => (
+              <button
+                key={slot}
+                onClick={() => setVsSlot(slot)}
+                className={`flex items-center gap-2 rounded-xl p-2 text-left ${vsSlot === slot ? "bg-white/15 ring-2 ring-[#fc4c02]" : "bg-black/20"}`}
+              >
+                <div className="h-10 w-10 shrink-0 overflow-hidden rounded-lg bg-[#101012]">{run?.polyline && <RouteThumb polyline={run.polyline} />}</div>
+                <div className="min-w-0">
+                  <div className={`text-[10px] font-bold ${slot === "now" ? "text-[#fc4c02]" : "text-white/60"}`}>{label}</div>
+                  <div className="truncate text-xs font-semibold">{run ? formatDate(run.date) : "Pick a run"}</div>
+                  {run && <div className="text-[11px] text-white/50">{compareValue(run, compare, units).text}</div>}
+                </div>
+              </button>
+            ))}
+          </div>
+          <div className="mb-3 flex max-h-52 flex-col gap-1 overflow-y-auto rounded-xl bg-black/20 p-2">
+            {vsCandidates.slice(0, 25).map((a) => (
+              <RunRow
+                key={a.id}
+                run={a}
+                units={units}
+                on={(vsSlot === "then" ? thenId : nowId) === a.id}
+                onClick={() => {
+                  if (vsSlot === "then") setThenId(a.id);
+                  else setNowId(a.id);
+                  setVsSlot(vsSlot === "then" ? "now" : "then");
+                }}
+              />
+            ))}
+          </div>
+
+          <div className="mb-1 text-xs text-white/50">Compare</div>
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {COMPARES.map((c) => {
+              const missing = c.key === "heartrate" && !(thenRun?.avgHr && nowRun?.avgHr);
+              return (
+                <button
+                  key={c.key}
+                  onClick={() => setCompare(c.key)}
+                  disabled={missing}
+                  className={`h-8 rounded-full px-3.5 text-xs font-semibold disabled:opacity-30 ${compare === c.key ? "bg-[#fc4c02] text-white" : "bg-white/10 text-white/70"}`}
+                >
+                  {c.label}
+                </button>
+              );
+            })}
+          </div>
+          {thenRun && nowRun && delta && (
+            <p className={`mb-3 text-sm font-bold ${delta.improved ? "text-[#fc4c02]" : "text-white/60"}`}>
+              {delta.headline} · {delta.detail}
+              {!similarDistance(thenRun, nowRun) && compare !== "distance" && (
+                <span className="block text-[11px] font-medium text-white/40">Tip: runs of a similar distance compare more fairly.</span>
+              )}
+            </p>
+          )}
+
+          <div className="mb-1 text-xs text-white/50">Background</div>
+          <div className="mb-2 flex rounded-xl bg-black/20 p-1 text-xs">
+            {(
+              [
+                ["side", "Side by side"],
+                ["stacked", "Top & bottom"],
+                ["none", "One photo"],
+              ] as const
+            ).map(([sp, label]) => (
+              <button
+                key={sp}
+                onClick={() => setVsSplit(sp)}
+                className={`h-9 flex-1 rounded-lg font-semibold ${vsSplit === sp ? "bg-white text-black" : "text-white/60"}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {vsSplit !== "none" && (
+            <div className="mb-3 grid grid-cols-2 gap-2">
+              {(["Then", "Now"] as const).map((label, i) => (
+                <button
+                  key={label}
+                  onClick={() => {
+                    vsPhotoSlot.current = i;
+                    vsPhotoInput.current?.click();
+                  }}
+                  className="flex h-11 items-center justify-center gap-1.5 rounded-xl bg-black/20 px-2 text-xs font-semibold"
+                >
+                  {vsPhotos[i] ? <Check size={14} className="shrink-0 text-[#fc4c02]" /> : <ImagePlus size={14} className="shrink-0" />}
+                  <span className="truncate">{vsPhotos[i] ? `${label} photo added` : `${label} photo (optional)`}</span>
+                </button>
+              ))}
+              <input
+                ref={vsPhotoInput}
+                type="file"
+                accept="image/*"
+                className="sr-only"
+                onChange={(e) => {
+                  const f = e.target.files?.[0] ?? null;
+                  setVsPhotos((p) => p.map((x, i) => (i === vsPhotoSlot.current ? f : x)));
+                  e.target.value = "";
+                }}
+              />
+            </div>
+          )}
+
+          <button
+            onClick={createVersus}
+            disabled={building || !thenRun || !nowRun || thenRun.id === nowRun.id}
+            className="h-12 w-full rounded-full bg-[#fc4c02] font-semibold active:brightness-90 disabled:opacity-40"
+          >
+            {building ? "Creating…" : "Create Then vs Now"}
+          </button>
+        </div>
+      )}
+
+      {tool === "result" && (
+        <div className="mb-4 rounded-2xl bg-white/5 p-3">
+          <div className="mb-1 text-xs text-white/50">Race</div>
+          <div className="mb-3 flex max-h-56 flex-col gap-1 overflow-y-auto rounded-xl bg-black/20 p-2">
+            {byRaceLikelihood(activities).map((a) => (
+              <RunRow key={a.id} run={a} units={units} on={resultId === a.id} onClick={() => setResultId(a.id)} />
+            ))}
+            {!activities.length && <p className="p-2 text-xs text-white/50">No runs loaded yet.</p>}
+          </div>
+          <p className="-mt-2 mb-3 text-[11px] text-white/40">Race not listed? Load more runs below, or select it in the grid first.</p>
+
+          {resultRun && cardSettings && withCard && (
+            <div className="mb-3">
+              <CardOptions
+                run={resultRun}
+                units={units}
+                value={cardSettings}
+                onChange={(patch) => setCard((c) => ({ ...c, ...patch }))}
+              />
+            </div>
+          )}
+
+          <div className="mb-1 text-xs text-white/50">Goal time (optional)</div>
+          <div className="mb-3 flex items-center gap-1.5">
+            {(["h", "m", "s"] as const).map((k, i) => (
+              <div key={k} className="flex flex-1 items-center gap-1.5">
+                {i > 0 && <span className="text-lg font-bold text-white/40">:</span>}
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={2}
+                  placeholder={k === "h" ? "h" : k === "m" ? "mm" : "ss"}
+                  value={goal[k]}
+                  onChange={(e) => setGoal((g) => ({ ...g, [k]: e.target.value.replace(/\D/g, "") }))}
+                  onFocus={(e) => e.target.select()}
+                  aria-label={k === "h" ? "Goal hours" : k === "m" ? "Goal minutes" : "Goal seconds"}
+                  className="h-11 w-full min-w-0 rounded-xl bg-white/10 text-center text-lg font-bold tabular-nums placeholder:font-medium placeholder:text-white/30 focus:ring-2 focus:ring-[#fc4c02] focus:outline-none"
+                />
+              </div>
+            ))}
+          </div>
+          {resultRun && goalSecs > 0 && (
+            <p className="-mt-1 mb-3 text-xs font-semibold text-[#fc4c02]">
+              {(() => {
+                const diff = resultSeconds(resultRun, card.time) - goalSecs;
+                return diff === 0
+                  ? "Right on goal"
+                  : `${formatClock(Math.abs(diff))} ${diff < 0 ? "under" : "over"} goal`;
+              })()}
+            </p>
+          )}
+
+          <div className="mb-3 flex flex-col gap-2">
+            <ToggleRow label="Finisher card" on={withCard} onClick={() => setWithCard((v) => !v)} />
+            <ToggleRow label="Goal vs actual" on={withGoal && goalSecs > 0} disabled={goalSecs === 0} onClick={() => setWithGoal((v) => !v)} />
+          </div>
+
+          <button
+            onClick={createResult}
+            disabled={building || !resultRun || (!withCard && !(withGoal && goalSecs > 0))}
+            className="h-12 w-full rounded-full bg-[#fc4c02] font-semibold active:brightness-90 disabled:opacity-40"
+          >
+            {building ? "Creating…" : "Create race result"}
+          </button>
+        </div>
+      )}
+
+      {tool === "timeline" && (
         <div className="mb-4 rounded-2xl bg-white/5 p-3">
           <p className="mb-3 text-xs text-white/60">
             Lay out a training block in order, e.g. 19 weeks from your first session to race day. Pick <b>Custom</b> for exact dates.
@@ -706,36 +1088,15 @@ export default function StravaPanel({
                 ))}
               </div>
               <div className="flex max-h-64 flex-col gap-1 overflow-y-auto">
-                {[...pool.runs]
-                  // Likely races first: Strava-marked races, then the longest runs.
-                  .sort((a, b) => Number(!!b.race) - Number(!!a.race) || b.distance - a.distance)
-                  .slice(0, 15)
-                  .map((a) => {
-                    const on = heroChoice === a.id;
-                    return (
-                      <button
-                        key={a.id}
-                        onClick={() => (setHeroChoice(a.id), setHeroPicking(false))}
-                        className={`flex items-center gap-2.5 rounded-lg p-1.5 text-left ${on ? "bg-white/10" : ""}`}
-                      >
-                        <div className="h-9 w-9 shrink-0 overflow-hidden rounded-md bg-[#101012]">
-                          {a.polyline && <RouteThumb polyline={a.polyline} />}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5 truncate text-sm font-medium">
-                            {a.race && <Flag size={12} className="shrink-0 text-[#fc4c02]" />}
-                            <span className="truncate">{a.name}</span>
-                          </div>
-                          <div className="text-[11px] text-white/45">{formatDate(a.date)}</div>
-                        </div>
-                        <div className="shrink-0 text-sm font-semibold tabular-nums">
-                          {(a.distance / unitLen(units)).toFixed(2)}
-                          <span className="ml-0.5 text-[10px] text-white/50">{units === "metric" ? "km" : "mi"}</span>
-                        </div>
-                        {on && <Check size={16} className="shrink-0 text-[#fc4c02]" />}
-                      </button>
-                    );
-                  })}
+                {byRaceLikelihood(pool.runs).map((a) => (
+                  <RunRow
+                    key={a.id}
+                    run={a}
+                    units={units}
+                    on={heroChoice === a.id}
+                    onClick={() => (setHeroChoice(a.id), setHeroPicking(false))}
+                  />
+                ))}
               </div>
             </div>
           )}
@@ -773,7 +1134,7 @@ export default function StravaPanel({
         </div>
       )}
 
-      {randomOpen && (
+      {tool === "random" && (
         <div className="mb-4 rounded-2xl bg-white/5 p-3">
           <div className="mb-1 text-xs text-white/50">How many (1–{MAX_RANDOM})</div>
           <div className="mb-3 flex items-center gap-3">
@@ -892,6 +1253,27 @@ export default function StravaPanel({
         </div>
       )}
     </div>
+  );
+}
+
+/** Compact run row for pickers: route thumb, name (flag if marked as Race), date, distance. */
+function RunRow({ run: a, units, on, onClick }: { run: Activity; units: Units; on: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} className={`flex items-center gap-2.5 rounded-lg p-1.5 text-left ${on ? "bg-white/10" : ""}`}>
+      <div className="h-9 w-9 shrink-0 overflow-hidden rounded-md bg-[#101012]">{a.polyline && <RouteThumb polyline={a.polyline} />}</div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5 truncate text-sm font-medium">
+          {a.race && <Flag size={12} className="shrink-0 text-[#fc4c02]" />}
+          <span className="truncate">{a.name}</span>
+        </div>
+        <div className="text-[11px] text-white/45">{formatDate(a.date)}</div>
+      </div>
+      <div className="shrink-0 text-sm font-semibold tabular-nums">
+        {(a.distance / unitLen(units)).toFixed(2)}
+        <span className="ml-0.5 text-[10px] text-white/50">{units === "metric" ? "km" : "mi"}</span>
+      </div>
+      {on && <Check size={16} className="shrink-0 text-[#fc4c02]" />}
+    </button>
   );
 }
 

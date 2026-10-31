@@ -66,3 +66,37 @@ export async function shapeSilhouette(mask: ShapeMask, f: Format, dx = 0, dy = 0
   const l = await loadImage(blob);
   return { id: uid(), ...l, x: x + dx, y: y + dy, scale, rotation: 0, opacity: 1, deco: true };
 }
+
+/** A faint smooth line through points in order (e.g. a spiral's path), behind the stickers. */
+export async function pathLine(points: { x: number; y: number }[]): Promise<Sticker> {
+  const pad = 12;
+  const x0 = Math.min(...points.map((p) => p.x)) - pad;
+  const x1 = Math.max(...points.map((p) => p.x)) + pad;
+  const y0 = Math.min(...points.map((p) => p.y)) - pad;
+  const y1 = Math.max(...points.map((p) => p.y)) + pad;
+  const S = 2;
+  const c = document.createElement("canvas");
+  c.width = Math.ceil((x1 - x0) * S);
+  c.height = Math.ceil((y1 - y0) * S);
+  const ctx = c.getContext("2d")!;
+  ctx.scale(S, S);
+  ctx.translate(-x0, -y0);
+  ctx.strokeStyle = "rgba(255,255,255,0.35)";
+  ctx.lineWidth = 4;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.setLineDash([2, 12]);
+  ctx.beginPath();
+  ctx.moveTo(points[0].x, points[0].y);
+  // Smooth through midpoints so the path curves instead of zigzagging.
+  for (let i = 1; i < points.length - 1; i++) {
+    const mx = (points[i].x + points[i + 1].x) / 2;
+    const my = (points[i].y + points[i + 1].y) / 2;
+    ctx.quadraticCurveTo(points[i].x, points[i].y, mx, my);
+  }
+  ctx.lineTo(points[points.length - 1].x, points[points.length - 1].y);
+  ctx.stroke();
+  const blob = await new Promise<Blob>((res, rej) => c.toBlob((b) => (b ? res(b) : rej(new Error("render failed"))), "image/png"));
+  const l = await loadImage(blob);
+  return { id: uid(), ...l, x: (x0 + x1) / 2, y: (y0 + y1) / 2, scale: 1 / S, rotation: 0, opacity: 1, deco: true };
+}

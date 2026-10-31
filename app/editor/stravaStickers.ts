@@ -9,7 +9,7 @@ const ROUTE_COLOR = "#FC5200";
 
 const isRun = (a: Activity) => /Run|Walk|Hike/.test(a.sport);
 
-function duration(s: number) {
+export function duration(s: number) {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const sec = Math.round(s % 60);
@@ -88,14 +88,14 @@ async function toLayer(canvas: HTMLCanvasElement) {
 }
 
 /** Strava-style route: thick orange line, no markers, transparent background. Longest side = `size`. */
-function routeCanvas(polyline: string, size = 1000) {
+function routeCanvas(polyline: string, size = 1000, strokeRatio = 0.03) {
   const pts = decodePolyline(polyline);
   const lat0 = (pts.reduce((s, p) => s + p[0], 0) / pts.length) * (Math.PI / 180);
   const xy = pts.map(([la, ln]) => [ln * Math.cos(lat0), -la]);
   const xs = xy.map((p) => p[0]);
   const ys = xy.map((p) => p[1]);
   const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
-  const stroke = size * 0.03;
+  const stroke = size * strokeRatio;
   const pad = stroke;
   const span = Math.max(x1 - x0, y1 - y0) || 1;
   const f = (size - pad * 2) / span;
@@ -256,28 +256,14 @@ function racePill(
   align: "center" | "left" = "center",
   height = 64,
 ) {
-  ctx.save();
-  ctx.shadowColor = "transparent";
-  ctx.font = `800 ${height * 0.62}px ${family}`;
-  const label = "RACE";
-  const w = ctx.measureText(label).width + height * 0.75;
-  const x = align === "center" ? cx - w / 2 : cx;
-  ctx.fillStyle = ROUTE_COLOR;
-  ctx.beginPath();
-  ctx.roundRect(x, top, w, height, height / 2);
-  ctx.fill();
-  ctx.fillStyle = "#fff";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(label, x + w / 2, top + height * 0.52);
-  ctx.restore();
-  return w;
+  const x = align === "center" ? cx - pillWidth(family, height) / 2 : cx;
+  return pill(ctx, "RACE", x, top, height, family, ROUTE_COLOR, "#fff");
 }
 
-function pillWidth(family: string, height: number) {
+function pillWidth(family: string, height: number, label = "RACE") {
   const m = document.createElement("canvas").getContext("2d")!;
-  m.font = `800 ${height * 0.62}px ${family}`;
-  return m.measureText("RACE").width + height * 0.75;
+  m.font = `800 ${height * 0.55}px ${family}`;
+  return m.measureText(label).width + height * 0.9;
 }
 
 export type Week = { index: number; start: Date; end: Date; runs: Activity[] };
@@ -388,4 +374,434 @@ export async function renderWeekSticker(w: Week, units: Units, raceDetails = tru
     y += l.size * 1.15;
   }
   return toLayer(c);
+}
+
+/** Break text into at most `maxLines` lines that fit `maxW`, ellipsizing the last one. */
+function wrap(ctx: CanvasRenderingContext2D, text: string, maxW: number, maxLines: number) {
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let line = "";
+  for (const w of words) {
+    const next = line ? `${line} ${w}` : w;
+    if (ctx.measureText(next).width <= maxW || !line) line = next;
+    else {
+      lines.push(line);
+      line = w;
+    }
+  }
+  if (line) lines.push(line);
+  if (lines.length > maxLines) {
+    let last = lines.slice(maxLines - 1).join(" ");
+    while (last.length > 1 && ctx.measureText(`${last}…`).width > maxW) last = last.slice(0, -1);
+    lines.splice(maxLines - 1, lines.length, `${last.trimEnd()}…`);
+  }
+  return lines;
+}
+
+function pill(ctx: CanvasRenderingContext2D, label: string, x: number, top: number, h: number, family: string, bg: string, fg: string) {
+  ctx.save();
+  ctx.shadowColor = "transparent";
+  ctx.font = `800 ${h * 0.55}px ${family}`;
+  const w = ctx.measureText(label).width + h * 0.9;
+  ctx.fillStyle = bg;
+  ctx.beginPath();
+  ctx.roundRect(x, top, w, h, h / 2);
+  ctx.fill();
+  ctx.fillStyle = fg;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, x + w / 2, top + h * 0.53);
+  ctx.restore();
+  return w;
+}
+
+export type ResultTime = "elapsed" | "moving";
+
+export const resultSeconds = (a: Activity, t: ResultTime) => (t === "elapsed" ? a.elapsedTime || a.movingTime : a.movingTime);
+
+export type CardMetric = "distance" | "pace" | "heartrate" | "maxhr" | "elevation" | "cadence" | "calories" | "moving" | "elapsed";
+
+export const CARD_METRICS: { key: CardMetric; label: string }[] = [
+  { key: "distance", label: "Distance" },
+  { key: "pace", label: "Avg pace" },
+  { key: "heartrate", label: "Avg HR" },
+  { key: "maxhr", label: "Max HR" },
+  { key: "elevation", label: "Elev gain" },
+  { key: "cadence", label: "Cadence" },
+  { key: "calories", label: "Calories" },
+  { key: "moving", label: "Moving time" },
+  { key: "elapsed", label: "Elapsed time" },
+];
+
+export const MAX_CARD_METRICS = 6;
+
+/** Formatted value of a card metric, or null when the activity has no data for it. */
+export function cardMetricValue(a: Activity, key: CardMetric, time: ResultTime, units: Units): string | null {
+  const len = units === "metric" ? 1000 : 1609.344;
+  const unit = units === "metric" ? "km" : "mi";
+  switch (key) {
+    case "distance":
+      return a.distance ? `${(a.distance / len).toFixed(2)} ${unit}` : null;
+    case "pace":
+      return a.distance ? `${duration(resultSeconds(a, time) / (a.distance / len))} /${unit}` : null;
+    case "heartrate":
+      return a.avgHr ? `${Math.round(a.avgHr)} bpm` : null;
+    case "maxhr":
+      return a.maxHr ? `${Math.round(a.maxHr)} bpm` : null;
+    case "elevation":
+      return a.elevation ? (units === "metric" ? `${Math.round(a.elevation)} m` : `${Math.round(a.elevation * 3.28084)} ft`) : null;
+    case "cadence":
+      return a.cadence ? `${a.cadence} spm` : null;
+    case "calories":
+      return a.calories ? `${Math.round(a.calories)} Cal` : null;
+    case "moving":
+      return a.movingTime ? duration(a.movingTime) : null;
+    case "elapsed":
+      return a.elapsedTime ? duration(a.elapsedTime) : null;
+  }
+}
+
+export const defaultCardMetrics = (a: Activity): CardMetric[] =>
+  a.avgHr ? ["distance", "pace", "heartrate"] : ["distance", "pace", "elevation"];
+
+/** Everything needed to (re)render a finisher card, kept on the sticker so it can be edited later. */
+export type FinisherSource = {
+  kind: "finisher";
+  run: Activity;
+  time: ResultTime;
+  pr: boolean;
+  units: Units;
+  metrics: CardMetric[];
+};
+
+/** Finisher card: badges, race name + date, big finish time, route, and a stats row. */
+export async function renderFinisherCard(a: Activity, opts: Omit<FinisherSource, "kind" | "run">) {
+  await document.fonts?.ready;
+  const family = fontFamily();
+  const W = 1000;
+  const pad = 40;
+  const secs = resultSeconds(a, opts.time);
+  const stats = CARD_METRICS.filter((m) => opts.metrics.includes(m.key))
+    .map((m) => ({ label: m.label, value: cardMetricValue(a, m.key, opts.time, opts.units) }))
+    .filter((s): s is { label: string; value: string } => !!s.value)
+    .slice(0, MAX_CARD_METRICS);
+  // 1–3 in a row, 4 as 2×2, 5–6 as two rows of 3.
+  const cols = stats.length <= 3 ? Math.max(1, stats.length) : stats.length === 4 ? 2 : 3;
+  const rows = Math.ceil(stats.length / cols);
+
+  const m = document.createElement("canvas").getContext("2d")!;
+  m.font = `800 76px ${family}`;
+  const nameLines = wrap(m, a.name, W, 2);
+  const route = a.polyline ? routeCanvas(a.polyline, 560) : null;
+  const routeH = route ? Math.min(route.height, 560) : 0;
+  const routeW = route ? (route.width * routeH) / route.height : 0;
+
+  const pillH = 64;
+  const timeSize = 230;
+  const statLabel = 38;
+  const cellW = W / cols;
+  // Shrink values together so the widest fits its cell.
+  let statValue = cols === 1 ? 96 : 72;
+  m.font = `800 ${statValue}px ${family}`;
+  const widest = Math.max(0, ...stats.map((s) => m.measureText(s.value).width));
+  if (widest > cellW * 0.9) statValue = Math.floor((statValue * cellW * 0.9) / widest);
+  const rowH = statLabel * 1.2 + statValue * 1.1 + 24;
+  const gap = 36;
+  const height =
+    pad * 2 + pillH + gap + nameLines.length * 76 * 1.12 + 44 * 1.3 + gap * 0.5 + timeSize * 1.0 + gap + (route ? routeH + gap : 0) + rows * rowH;
+
+  const c = document.createElement("canvas");
+  c.width = W + pad * 2;
+  c.height = Math.ceil(height);
+  const ctx = c.getContext("2d")!;
+  const cx = c.width / 2;
+  let y = pad;
+
+  // Badges, centered as a row.
+  const badges: [string, string, string][] = [["FINISHER", ROUTE_COLOR, "#fff"]];
+  if (opts.pr) badges.push(["PR", "#fff", "#111"]);
+  const widths = badges.map(([l]) => pillWidth(family, pillH, l));
+  let x = cx - (widths.reduce((s, w) => s + w, 0) + 16 * (badges.length - 1)) / 2;
+  badges.forEach(([l, bg, fg], i) => {
+    pill(ctx, l, x, y, pillH, family, bg, fg);
+    x += widths[i] + 16;
+  });
+  y += pillH + gap;
+
+  shadow(ctx);
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  ctx.font = `800 76px ${family}`;
+  for (const line of nameLines) {
+    ctx.fillText(line, cx, y);
+    y += 76 * 1.12;
+  }
+  ctx.globalAlpha = 0.85;
+  ctx.font = `500 44px ${family}`;
+  ctx.fillText(formatDate(a.date), cx, y);
+  ctx.globalAlpha = 1;
+  y += 44 * 1.3 + gap * 0.5;
+
+  ctx.font = `900 ${timeSize}px ${family}`;
+  ctx.fillText(duration(secs), cx, y, W);
+  y += timeSize + gap;
+
+  if (route) {
+    ctx.save();
+    ctx.shadowColor = "transparent";
+    ctx.drawImage(route, cx - routeW / 2, y, routeW, routeH);
+    ctx.restore();
+    y += routeH + gap;
+  }
+
+  stats.forEach((s, i) => {
+    const row = Math.floor(i / cols);
+    const inRow = Math.min(cols, stats.length - row * cols);
+    const sx = pad + (W - inRow * cellW) / 2 + cellW * ((i % cols) + 0.5);
+    const sy = y + row * rowH;
+    ctx.globalAlpha = 0.85;
+    ctx.font = `600 ${statLabel}px ${family}`;
+    ctx.fillText(s.label.toUpperCase(), sx, sy, cellW * 0.95);
+    ctx.globalAlpha = 1;
+    ctx.font = `800 ${statValue}px ${family}`;
+    ctx.fillText(s.value, sx, sy + statLabel * 1.2, cellW * 0.95);
+  });
+
+  return toLayer(c);
+}
+
+/** "GOAL 2:00:00 → FINISHED 1:57:42" with a margin badge (orange when beaten). */
+export async function renderGoalSticker(goalSecs: number, actualSecs: number) {
+  await document.fonts?.ready;
+  const family = fontFamily();
+  const pad = 36;
+  const label = 38;
+  const value = 110;
+  const arrowGap = 70;
+  const diff = Math.round(actualSecs - goalSecs);
+  const beat = diff < 0;
+  const badge = diff === 0 ? "Right on goal" : `${beat ? "−" : "+"}${duration(Math.abs(diff))} ${beat ? "under goal" : "over goal"}`;
+
+  const m = document.createElement("canvas").getContext("2d")!;
+  m.font = `800 ${value}px ${family}`;
+  const goalW = m.measureText(duration(goalSecs)).width;
+  const actualW = m.measureText(duration(actualSecs)).width;
+  const badgeH = 72;
+  const badgeW = pillWidth(family, badgeH, badge);
+
+  const rowW = goalW + arrowGap * 2 + actualW;
+  const c = document.createElement("canvas");
+  c.width = Math.ceil(Math.max(rowW, badgeW) + pad * 2);
+  c.height = Math.ceil(pad * 2 + label * 1.25 + value * 1.05 + 30 + badgeH);
+  const ctx = c.getContext("2d")!;
+  const left = (c.width - rowW) / 2;
+  const top = pad;
+
+  shadow(ctx);
+  ctx.textBaseline = "top";
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#fff";
+  ctx.globalAlpha = 0.85;
+  ctx.font = `600 ${label}px ${family}`;
+  ctx.fillText("GOAL", left, top);
+  ctx.fillText("FINISHED", left + goalW + arrowGap * 2, top);
+  ctx.globalAlpha = 0.6;
+  ctx.font = `800 ${value}px ${family}`;
+  ctx.fillText(duration(goalSecs), left, top + label * 1.25);
+  ctx.globalAlpha = 1;
+  ctx.fillText(duration(actualSecs), left + goalW + arrowGap * 2, top + label * 1.25);
+
+  // Arrow between the two times.
+  const ay = top + label * 1.25 + value * 0.5;
+  const ax0 = left + goalW + arrowGap * 0.45;
+  const ax1 = left + goalW + arrowGap * 1.55;
+  ctx.strokeStyle = beat || diff === 0 ? ROUTE_COLOR : "#fff";
+  ctx.lineWidth = 10;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(ax0, ay);
+  ctx.lineTo(ax1, ay);
+  ctx.moveTo(ax1 - 22, ay - 22);
+  ctx.lineTo(ax1, ay);
+  ctx.lineTo(ax1 - 22, ay + 22);
+  ctx.stroke();
+
+  pill(
+    ctx,
+    badge,
+    (c.width - badgeW) / 2,
+    top + label * 1.25 + value * 1.05 + 30,
+    badgeH,
+    family,
+    beat || diff === 0 ? ROUTE_COLOR : "rgba(255,255,255,0.18)",
+    "#fff",
+  );
+  return toLayer(c);
+}
+
+export type Compare = "pace" | "time" | "distance" | "heartrate";
+
+export const COMPARES: { key: Compare; label: string }[] = [
+  { key: "pace", label: "Pace" },
+  { key: "time", label: "Time" },
+  { key: "distance", label: "Distance" },
+  { key: "heartrate", label: "Avg HR" },
+];
+
+/** The compared number for one run: raw value (for maths) and how it's shown. */
+export function compareValue(a: Activity, c: Compare, units: Units) {
+  const len = units === "metric" ? 1000 : 1609.344;
+  const unit = units === "metric" ? "km" : "mi";
+  switch (c) {
+    case "pace": {
+      const raw = a.distance ? a.movingTime / (a.distance / len) : 0;
+      return { label: "Avg pace", raw, text: `${duration(raw)} /${unit}` };
+    }
+    case "time":
+      return { label: "Time", raw: a.movingTime, text: duration(a.movingTime) };
+    case "distance":
+      return { label: "Distance", raw: a.distance / len, text: `${(a.distance / len).toFixed(2)} ${unit}` };
+    case "heartrate":
+      return { label: "Avg HR", raw: a.avgHr ?? 0, text: a.avgHr ? `${Math.round(a.avgHr)} bpm` : "–" };
+  }
+}
+
+/** Change from `then` to `now`: headline ("−1:25 /km"), detail ("21% faster"), and whether it's better. */
+export function compareDelta(then: Activity, now: Activity, c: Compare, units: Units) {
+  const a = compareValue(then, c, units).raw;
+  const b = compareValue(now, c, units).raw;
+  const diff = b - a;
+  const unit = units === "metric" ? "km" : "mi";
+  const pct = a ? Math.round((Math.abs(diff) / a) * 100) : 0;
+  const sign = diff < 0 ? "−" : "+";
+  // Lower is better for pace, time and heart rate; higher is better for distance.
+  const improved = c === "distance" ? diff > 0 : diff < 0;
+  const same = Math.abs(diff) < (c === "distance" ? 0.005 : 0.5);
+  const words: Record<Compare, [string, string]> = {
+    pace: ["faster", "slower"],
+    time: ["faster", "slower"],
+    distance: ["further", "shorter"],
+    heartrate: ["lower HR", "higher HR"],
+  };
+  const headline =
+    c === "pace"
+      ? `${sign}${duration(Math.abs(diff))} /${unit}`
+      : c === "time"
+        ? `${sign}${duration(Math.abs(diff))}`
+        : c === "distance"
+          ? `${sign}${Math.abs(diff).toFixed(2)} ${unit}`
+          : `${sign}${Math.round(Math.abs(diff))} bpm`;
+  return {
+    headline: same ? "Same" : headline,
+    detail: same ? "no change" : `${pct}% ${words[c][improved ? 0 : 1]}`,
+    improved: !same && improved,
+  };
+}
+
+const monthYear = (iso: string) =>
+  new Date(iso).toLocaleDateString(undefined, { month: "short", year: "numeric", timeZone: "UTC" }).toUpperCase();
+
+/** THEN / NOW sticker: label + month, route, the compared value big, distance · time small. */
+export async function renderVersusSticker(a: Activity, role: "then" | "now", c: Compare, units: Units) {
+  await document.fonts?.ready;
+  const family = fontFamily();
+  const W = 760;
+  const pad = 30;
+  const len = units === "metric" ? 1000 : 1609.344;
+  const unit = units === "metric" ? "km" : "mi";
+  const value = compareValue(a, c, units);
+  const route = a.polyline ? routeCanvas(a.polyline, 420) : null;
+  const routeH = route ? Math.min(route.height, 420) : 0;
+  const routeW = route ? (route.width * routeH) / route.height : 0;
+  const pillH = 60;
+  const gap = 28;
+  const sub = c === "distance" ? duration(a.movingTime) : c === "time" ? `${(a.distance / len).toFixed(2)} ${unit}` : `${(a.distance / len).toFixed(2)} ${unit} · ${duration(a.movingTime)}`;
+
+  const c2 = document.createElement("canvas");
+  c2.width = W + pad * 2;
+  c2.height = Math.ceil(pad * 2 + pillH + gap + (route ? routeH + gap : 0) + 36 * 1.2 + 120 * 1.05 + 44 * 1.3);
+  const ctx = c2.getContext("2d")!;
+  const cx = c2.width / 2;
+  let y = pad;
+
+  // Label pill + month, centered as one row.
+  const label = role === "then" ? "THEN" : "NOW";
+  const month = monthYear(a.date);
+  const pw = pillWidth(family, pillH, label);
+  ctx.font = `700 40px ${family}`;
+  const mw = ctx.measureText(month).width;
+  const rowX = cx - (pw + 18 + mw) / 2;
+  pill(ctx, label, rowX, y, pillH, family, role === "now" ? ROUTE_COLOR : "rgba(255,255,255,0.22)", "#fff");
+  shadow(ctx);
+  ctx.fillStyle = "#fff";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.fillText(month, rowX + pw + 18, y + pillH / 2 + 2);
+  y += pillH + gap;
+
+  if (route) {
+    ctx.save();
+    ctx.shadowColor = "transparent";
+    ctx.drawImage(route, cx - routeW / 2, y, routeW, routeH);
+    ctx.restore();
+    y += routeH + gap;
+  }
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  ctx.globalAlpha = 0.85;
+  ctx.font = `600 36px ${family}`;
+  ctx.fillText(value.label.toUpperCase(), cx, y, W);
+  y += 36 * 1.2;
+  ctx.globalAlpha = 1;
+  ctx.font = `800 120px ${family}`;
+  ctx.fillText(value.text, cx, y, W);
+  y += 120 * 1.05;
+  ctx.globalAlpha = 0.85;
+  ctx.font = `500 44px ${family}`;
+  ctx.fillText(sub, cx, y, W);
+  return toLayer(c2);
+}
+
+/** The difference badge: a solid card (orange when improved) with the headline and percentage. */
+export async function renderDeltaSticker(then: Activity, now: Activity, c: Compare, units: Units) {
+  await document.fonts?.ready;
+  const family = fontFamily();
+  const d = compareDelta(then, now, c, units);
+  const m = document.createElement("canvas").getContext("2d")!;
+  m.font = `900 110px ${family}`;
+  const hw = m.measureText(d.headline).width;
+  m.font = `700 46px ${family}`;
+  const dw = m.measureText(d.detail.toUpperCase()).width;
+  const padX = 60;
+  const padY = 34;
+  const w = Math.max(hw, dw) + padX * 2;
+  const h = padY * 2 + 110 + 12 + 46;
+  const c2 = document.createElement("canvas");
+  c2.width = Math.ceil(w + 20);
+  c2.height = Math.ceil(h + 20);
+  const ctx = c2.getContext("2d")!;
+  ctx.shadowColor = "rgba(0,0,0,0.35)";
+  ctx.shadowBlur = 16;
+  ctx.fillStyle = d.improved ? ROUTE_COLOR : "#2a2a2e";
+  ctx.beginPath();
+  ctx.roundRect(10, 10, w, h, 36);
+  ctx.fill();
+  ctx.shadowColor = "transparent";
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  ctx.font = `900 110px ${family}`;
+  ctx.fillText(d.headline, c2.width / 2, 10 + padY);
+  ctx.globalAlpha = 0.9;
+  ctx.font = `700 46px ${family}`;
+  ctx.fillText(d.detail.toUpperCase(), c2.width / 2, 10 + padY + 110 + 12);
+  return toLayer(c2);
+}
+
+/** Just the route, with a bolder line so it still reads when shrunk into a constellation or spiral. */
+export async function renderRouteOnly(a: Activity) {
+  return toLayer(routeCanvas(a.polyline!, 600, 0.05));
 }

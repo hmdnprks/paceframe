@@ -1,10 +1,10 @@
 import { placeInShape, type ShapeMask, type ShapeMode } from "./shape";
-import type { Transform } from "./types";
+import type { Split, Transform } from "./types";
 
 type Box = { nw: number; nh: number };
 type Rect = { x: number; y: number; w: number; h: number };
 
-export type LayoutId = "stack" | "corner" | "grid" | "arc" | "timeline" | "row" | "circle" | "hero" | "scatter" | "shape";
+export type LayoutId = "stack" | "corner" | "grid" | "arc" | "timeline" | "row" | "circle" | "hero" | "scatter" | "shape" | "versus" | "honeycomb" | "spiral";
 
 export const LAYOUTS: { id: LayoutId; label: string; hint: string }[] = [
   { id: "stack", label: "Stack", hint: "Centered column" },
@@ -16,6 +16,8 @@ export const LAYOUTS: { id: LayoutId; label: string; hint: string }[] = [
   { id: "circle", label: "Circle", hint: "Ring around center" },
   { id: "hero", label: "Hero", hint: "First big, rest below" },
   { id: "scatter", label: "Scatter", hint: "Random, tilted" },
+  { id: "honeycomb", label: "Honeycomb", hint: "Offset rows, tightly packed" },
+  { id: "spiral", label: "Spiral", hint: "First in the center, growing out" },
 ];
 
 const fit = (b: Box, maxW: number, maxH: number) => Math.min(maxW / b.nw, maxH / b.nh, 4);
@@ -80,6 +82,14 @@ export type LayoutOptions = {
   horizontal?: boolean;
   /** Timeline: the last sticker is a big finale (e.g. the race). */
   hero?: boolean;
+  /** Per-sticker weights (e.g. run distance) for layouts that size by value. */
+  weights?: number[];
+  /** Spiral: size stickers by weight instead of growing outward. */
+  bySize?: boolean;
+  /** Spiral: draw a faint path through the stickers. */
+  path?: boolean;
+  /** Versus: how the background is split (stickers go one per half, badge in between). */
+  split?: Split;
   /** Shape: silhouette from an uploaded image. */
   mask?: ShapeMask | null;
   shapeMode?: ShapeMode;
@@ -89,14 +99,14 @@ export type LayoutOptions = {
 };
 
 /** Layouts that open the tuning panel (columns, bend…) after being applied. */
-export const TUNABLE: LayoutId[] = ["grid", "arc", "timeline", "shape"];
+export const TUNABLE: LayoutId[] = ["grid", "arc", "timeline", "shape", "honeycomb", "spiral"];
 export const DEFAULT_BEND = 100;
 
 export const MAX_COLS = 8;
 export const defaultCols = (n: number) => (n > 6 ? 3 : Math.min(n, 2));
 
 /** Uniformly shrink (never grow) a placement so its bounds fit the area, then center it there. */
-function fitInto(items: Box[], t: Transform[], area: Rect): Transform[] {
+function fitInto(items: Box[], t: Transform[], area: Rect, grow = false): Transform[] {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   t.forEach((p, i) => {
     const r = (p.rotation * Math.PI) / 180;
@@ -109,7 +119,7 @@ function fitInto(items: Box[], t: Transform[], area: Rect): Transform[] {
     y0 = Math.min(y0, p.y - ey);
     y1 = Math.max(y1, p.y + ey);
   });
-  const f = Math.min(1, area.w / (x1 - x0), area.h / (y1 - y0));
+  const f = Math.min(grow ? Infinity : 1, area.w / (x1 - x0), area.h / (y1 - y0));
   const cx = (x0 + x1) / 2;
   const cy = (y0 + y1) / 2;
   return t.map((p) => ({
@@ -269,6 +279,95 @@ function timeline(items: Box[], W: number, H: number, o: TimelineOpts): Transfor
   });
 }
 
+/**
+ * Then vs Now: items[0] in the first half, items[1] in the second, items[2] (the difference badge)
+ * between them. Side by side keeps stickers low so faces stay visible; stacked hugs the divider.
+ */
+function versus(items: Box[], W: number, H: number, split: Split): Transform[] {
+  const area = safeArea(W, H);
+  const gap = W * 0.03;
+  const [a, b, badge] = items;
+  const out: Transform[] = [];
+  if (split === "stacked") {
+    const badgeScale = badge ? fit(badge, W * 0.55, H * 0.07) : 0;
+    const badgeH = badge ? badge.nh * badgeScale : 0;
+    const topRoom = H / 2 - badgeH / 2 - gap - area.y;
+    const bottomRoom = area.y + area.h - (H / 2 + badgeH / 2 + gap);
+    const sa = fit(a, area.w * 0.62, topRoom);
+    const sb = fit(b, area.w * 0.62, bottomRoom);
+    out.push({ x: W / 2, y: H / 2 - badgeH / 2 - gap - (a.nh * sa) / 2, scale: sa, rotation: 0 });
+    out.push({ x: W / 2, y: H / 2 + badgeH / 2 + gap + (b.nh * sb) / 2, scale: sb, rotation: 0 });
+    if (badge) out.push({ x: W / 2, y: H / 2, scale: badgeScale, rotation: 0 });
+  } else {
+    const cellW = W / 2 - gap * 2;
+    const cellH = area.h * 0.4;
+    const sa = fit(a, cellW, cellH);
+    const sb = fit(b, cellW, cellH);
+    const bottom = area.y + area.h;
+    out.push({ x: W / 4, y: bottom - (a.nh * sa) / 2, scale: sa, rotation: 0 });
+    out.push({ x: (W * 3) / 4, y: bottom - (b.nh * sb) / 2, scale: sb, rotation: 0 });
+    if (badge) {
+      const s = fit(badge, W * 0.6, H * 0.08);
+      const top = bottom - Math.max(a.nh * sa, b.nh * sb);
+      out.push({ x: W / 2, y: top - gap - (badge.nh * s) / 2, scale: s, rotation: 0 });
+    }
+  }
+  // Anything beyond the three goes into a simple grid below the middle.
+  return items.length > 3 ? [...out, ...grid(items.slice(3), area, defaultCols(items.length - 3), W * 0.3)] : out;
+}
+
+/** Columns that make a honeycomb roughly fill the safe area. */
+export function honeyCols(n: number, W = 1080, H = 1920) {
+  const area = safeArea(W, H);
+  return Math.max(1, Math.min(MAX_COLS, n, Math.round(Math.sqrt((n * area.w) / (area.h * 0.87)))));
+}
+
+/** Hex-style packing: every other row shifted half a cell, rows overlapping like a honeycomb. */
+function honeycomb(items: Box[], area: Rect, cols: number): Transform[] {
+  const rows = Math.ceil(items.length / cols);
+  // Shrink cells until the block fits the area's height too.
+  let cell = area.w / (cols + (rows > 1 ? 0.5 : 0));
+  cell = Math.min(cell, area.h / (1 + (rows - 1) * 0.87));
+  const rowH = cell * 0.87;
+  const blockH = cell + (rows - 1) * rowH;
+  const top = area.y + (area.h - blockH) / 2 + cell / 2;
+  return items.map((b, i) => {
+    const r = Math.floor(i / cols);
+    const inRow = Math.min(cols, items.length - r * cols);
+    const shift = r % 2 ? cell / 2 : 0;
+    const rowW = inRow * cell + (rows > 1 ? cell / 2 : 0);
+    const left = area.x + (area.w - rowW) / 2 + shift + cell / 2;
+    return { x: left + (i % cols) * cell, y: top + r * rowH, scale: fit(b, cell * 0.84, cell * 0.84), rotation: 0 };
+  });
+}
+
+/**
+ * Archimedean spiral from the center outward, in sticker order. Sizes grow along the spiral,
+ * or follow `weights` (e.g. distance) when `bySize`. The result is scaled to fill the area.
+ */
+function spiral(items: Box[], area: Rect, weights: number[] | undefined, bySize: boolean): Transform[] {
+  const n = items.length;
+  const wMax = Math.max(0, ...(weights ?? []));
+  const sizes = items.map((_, i) => {
+    const t = bySize && wMax > 0 ? Math.sqrt((weights?.[i] ?? 0) / wMax) : n > 1 ? i / (n - 1) : 1;
+    return 0.45 + 0.55 * t; // relative cell size
+  });
+  const out: Transform[] = [];
+  let theta = 0;
+  let r = 0;
+  for (let i = 0; i < n; i++) {
+    const size = sizes[i];
+    out.push({ x: r * Math.cos(theta), y: r * Math.sin(theta), scale: fit(items[i], size, size), rotation: 0 });
+    const next = sizes[Math.min(i + 1, n - 1)];
+    const step = (size + next) / 2 + 0.12;
+    // Advance along the arc by about one sticker; the radius grows a full sticker per turn so rings don't touch.
+    const dTheta = r < step ? Math.PI / 2 : step / r;
+    theta += dTheta;
+    r += ((Math.max(size, next) + 0.22) * dTheta) / (2 * Math.PI) + (i === 0 ? step : 0);
+  }
+  return fitInto(items, out, area, true);
+}
+
 export function applyLayout(id: LayoutId, items: Box[], W: number, H: number, opts: LayoutOptions = {}): Transform[] {
   const rand = opts.rand ?? Math.random;
   const area = safeArea(W, H);
@@ -306,6 +405,13 @@ export function applyLayout(id: LayoutId, items: Box[], W: number, H: number, op
     case "shape":
       if (!opts.mask) return grid(items, area, defaultCols(n), W * 0.4);
       return placeInShape(items, area, opts.mask, opts.shapeMode ?? "fill");
+    case "honeycomb":
+      return honeycomb(items, area, Math.min(opts.cols ?? honeyCols(n, W, H), n));
+    case "spiral":
+      return spiral(items, area, opts.weights, opts.bySize ?? false);
+    case "versus":
+      if (n < 2) return grid(items, area, 1, W * 0.5);
+      return versus(items, W, H, opts.split ?? "side");
     case "timeline":
       return timeline(items, W, H, { zigzag: opts.zigzag ?? false, horizontal: opts.horizontal ?? false, hero: opts.hero ?? false });
     case "hero": {

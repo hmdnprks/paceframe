@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { applyLayout, cascade, DEFAULT_BEND, defaultCols, LAYOUTS, MAX_COLS, TUNABLE, type LayoutId, type LayoutOptions } from "./layouts";
+import { applyLayout, cascade, DEFAULT_BEND, defaultCols, honeyCols, LAYOUTS, MAX_COLS, TUNABLE, type LayoutId, type LayoutOptions } from "./layouts";
 import { maxMultiplier, renderImage } from "./export";
 import StravaPanel from "./StravaPanel";
-import { shapeSilhouette, timelineLine } from "./decorations";
+import CardOptions, { type CardSettings } from "./CardOptions";
+import { renderFinisherCard } from "./stravaStickers";
+import { pathLine, shapeSilhouette, timelineLine } from "./decorations";
 import { extractMask } from "./shape";
 import {
   ArrowDown,
@@ -25,6 +27,7 @@ import {
   Maximize2,
   Minus,
   Move,
+  PencilLine,
   Plus,
   RotateCcw,
   Shapes,
@@ -35,11 +38,13 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { FORMATS, loadImage, uid, type Background, type Format, type Sticker, type Transform } from "./types";
+import { DIVIDER, FORMATS, loadImage, panes, uid, type Background, type Format, type Rect, type Split, type Sticker, type Transform } from "./types";
 
-type Target = "bg" | string;
+/** "bg" / "bg2" = the first / second background photo; anything else is a sticker id (or the group). */
+type Target = "bg" | "bg2" | string;
+const isBg = (t: Target | null) => t === "bg" || t === "bg2";
 type Pt = { x: number; y: number };
-type Sheet = null | "layout" | "tune" | "export" | "format" | "strava";
+type Sheet = null | "layout" | "tune" | "export" | "format" | "strava" | "edit" | "photo";
 
 const SNAP_PX = 10;
 const GROUP = "__group";
@@ -89,6 +94,9 @@ function snapAngle(deg: number) {
 export default function Editor() {
   const [format, setFormat] = useState<Format>(FORMATS[0]);
   const [bg, setBg] = useState<Background | null>(null);
+  // Second photo when the background is split (right half, or bottom half).
+  const [bg2, setBg2] = useState<Background | null>(null);
+  const [split, setSplitState] = useState<Split>("none");
   const [stickers, setStickers] = useState<Sticker[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [sheet, setSheet] = useState<Sheet>(null);
@@ -110,7 +118,7 @@ export default function Editor() {
   const k = dispW / format.w; // screen px per design unit
 
   // Latest state for gesture handlers.
-  const live = useRef({ bg, stickers, format, k, groupIds: [] as string[] });
+  const live = useRef({ bg, bg2, split, stickers, format, k, groupIds: [] as string[] });
 
   // Coming back from Strava OAuth (?strava=connected or ?strava_error=…): reopen the Strava sheet.
   const [stravaError, setStravaError] = useState<string | null>(null);
@@ -127,20 +135,48 @@ export default function Editor() {
   const photoInput = useRef<HTMLInputElement>(null);
   const stickerInput = useRef<HTMLInputElement>(null);
 
-  const coverBg = (b: Omit<Background, keyof Transform>, f: Format): Background => ({
+  /** Fit a photo to cover its pane (the whole canvas, or one half when split). */
+  const coverBg = (b: Omit<Background, keyof Transform>, pane: Rect): Background => ({
     ...b,
-    x: f.w / 2,
-    y: f.h / 2,
-    scale: Math.max(f.w / b.nw, f.h / b.nh),
+    x: pane.x + pane.w / 2,
+    y: pane.y + pane.h / 2,
+    scale: Math.max(pane.w / b.nw, pane.h / b.nh),
     rotation: 0,
   });
 
+  // Which pane the photo picker fills: 0 = single/first, 1 = second.
+  const photoSlot = useRef<0 | 1>(0);
+
+  function pickPhoto(slot: 0 | 1) {
+    photoSlot.current = slot;
+    setSheet(null);
+    photoInput.current?.click();
+  }
+
+  async function setPhoto(file: File, slot: 0 | 1, sp: Split = split, f: Format = format) {
+    const loaded = await loadImage(file);
+    const pane = panes(f, sp)[Math.min(slot, panes(f, sp).length - 1)];
+    const old = slot === 0 ? live.current.bg : live.current.bg2;
+    if (old) URL.revokeObjectURL(old.src);
+    const next = coverBg({ id: slot === 0 ? "bg" : "bg2", ...loaded }, pane);
+    if (slot === 0) setBg(next);
+    else setBg2(next);
+  }
+
   async function onPhoto(files: FileList | null) {
     const file = files?.[0];
-    if (!file) return;
-    const loaded = await loadImage(file);
-    if (bg) URL.revokeObjectURL(bg.src);
-    setBg(coverBg({ id: "bg", ...loaded }, format));
+    if (file) await setPhoto(file, photoSlot.current);
+  }
+
+  /** Switch between one photo and a two-photo split; photos re-fit their new panes. */
+  function setSplit(next: Split, f: Format = format) {
+    const [p0, p1] = panes(f, next);
+    setBg((b) => (b ? coverBg(b, p0) : b));
+    if (next === "none") {
+      if (live.current.bg2) URL.revokeObjectURL(live.current.bg2.src);
+      setBg2(null);
+    } else setBg2((b) => (b ? coverBg(b, p1) : b));
+    setSplitState(next);
   }
 
   async function onStickers(files: FileList | null) {
@@ -175,11 +211,18 @@ export default function Editor() {
     if (stickers.length + added.length > 1) setSheet("layout");
   }
 
+  /** Then vs Now from Strava: split the background, load both photos, place THEN / NOW / badge. */
+  async function addThenNow(layers: Awaited<ReturnType<typeof loadImage>>[], sp: Split, photos: (File | null)[]) {
+    setSplit(sp);
+    await Promise.all(photos.map((f, i) => f && setPhoto(f, i === 0 ? 0 : 1, sp)));
+    addLayers(layers, undefined, "versus", { split: sp });
+  }
+
   function changeFormat(f: Format) {
     const sx = f.w / format.w;
     const sy = f.h / format.h;
     setStickers((s) => s.map((st) => ({ ...st, x: st.x * sx, y: st.y * sy })));
-    if (bg) setBg(coverBg(bg, f));
+    setSplit(split, f);
     setFormat(f);
     setSheet(null);
   }
@@ -193,6 +236,10 @@ export default function Editor() {
     zigzag: false,
     horizontal: false,
     hero: false,
+    split: "side",
+    weights: [],
+    bySize: false,
+    path: true,
     mask: null,
     shapeMode: "fill",
     silhouette: false,
@@ -201,7 +248,7 @@ export default function Editor() {
   const [groupIds, setGroupIds] = useState<string[]>([]);
   const groupMembers = stickers.filter((s) => groupIds.includes(s.id));
   const grouped = groupMembers.length > 1;
-  live.current = { bg, stickers, format, k, groupIds };
+  live.current = { bg, bg2, split, stickers, format, k, groupIds };
 
   // Ignores stale async decorations when the layout changes quickly (e.g. tapping through options).
   const decoRun = useRef(0);
@@ -210,7 +257,7 @@ export default function Editor() {
     // Layout decorations (timeline line) are rebuilt for every arrangement.
     base.filter((s) => s.deco).forEach((s) => URL.revokeObjectURL(s.src));
     const items = base.filter((s) => !s.deco);
-    const t = applyLayout(id, items, format.w, format.h, o);
+    const t = applyLayout(id, items, format.w, format.h, { ...o, weights: items.map((s) => s.weight ?? 0) });
     let next = items.map((st, i) => ({ ...st, ...t[i] }));
     let dx = 0;
     let dy = 0;
@@ -235,7 +282,9 @@ export default function Editor() {
         ? timelineLine(next.length, format, o, dx, dy)
         : id === "shape" && o.mask && o.silhouette
           ? shapeSilhouette(o.mask, format, dx, dy)
-          : null;
+          : id === "spiral" && o.path && next.length > 2
+            ? pathLine(next.map((s) => ({ x: s.x, y: s.y })))
+            : null;
     deco?.then((d) => {
       if (run !== decoRun.current) return URL.revokeObjectURL(d.src);
       setStickers((s) => [d, ...s.filter((x) => !x.deco)]);
@@ -286,7 +335,10 @@ export default function Editor() {
   function pickLayout(id: LayoutId) {
     if (!TUNABLE.includes(id) || id === "timeline") return arrange(id);
     const n = stickers.filter((s) => !s.deco).length;
-    const o = { ...opts, cols: Math.min(hintCols ?? (id === "arc" ? 5 : defaultCols(n)), n, MAX_COLS) };
+    const items = stickers.filter((s) => !s.deco);
+    const cols = id === "honeycomb" ? honeyCols(n, format.w, format.h) : (hintCols ?? (id === "arc" ? 5 : defaultCols(n)));
+    // Spiral sizes by distance when the stickers carry one (Strava routes).
+    const o = { ...opts, cols: Math.min(cols, n, MAX_COLS), bySize: id === "spiral" ? items.some((s) => s.weight) : opts.bySize };
     setOpts(o);
     arrange(id, o);
   }
@@ -317,6 +369,7 @@ export default function Editor() {
 
   const update = useCallback((target: Target, t: Partial<Transform>) => {
     if (target === "bg") setBg((b) => (b ? { ...b, ...t } : b));
+    else if (target === "bg2") setBg2((b) => (b ? { ...b, ...t } : b));
     else setStickers((s) => s.map((st) => (st.id === target ? { ...st, ...t } : st)));
   }, []);
 
@@ -338,8 +391,9 @@ export default function Editor() {
 
   /** Current transform of a target. A group is represented by its bounding-box center at scale 1, rotation 0. */
   const current = (target: Target): Transform | null => {
-    const { bg, stickers } = live.current;
+    const { bg, bg2, stickers } = live.current;
     if (target === "bg") return bg;
+    if (target === "bg2") return bg2;
     if (target === GROUP) {
       const m = liveGroup();
       if (!m.length) return null;
@@ -373,6 +427,17 @@ export default function Editor() {
     g.current.start = target ? snapshot(target, [...pointers.values()].map(toDesign)) : null;
   };
 
+  /** The background photo under a screen point (the touched half when split). */
+  const bgAt = (p: Pt): Target | null => {
+    const { bg, bg2, split, format } = live.current;
+    if (split !== "none" && bg2) {
+      const d = toDesign(p);
+      const second = panes(format, split)[1];
+      if (d.x >= second.x && d.y >= second.y) return "bg2";
+    }
+    return bg ? "bg" : null;
+  };
+
   function onPointerDown(e: React.PointerEvent) {
     const el = e.target as HTMLElement;
     if (el.closest("[data-handle]")) return;
@@ -380,7 +445,7 @@ export default function Editor() {
     if (g.current.pointers.size === 0) {
       const id = el.closest<HTMLElement>("[data-sticker]")?.dataset.sticker;
       const inGroup = el.closest("[data-group]") || (id && live.current.groupIds.includes(id) && liveGroup().length > 1);
-      g.current.target = inGroup ? GROUP : (id ?? (live.current.bg ? "bg" : null));
+      g.current.target = inGroup ? GROUP : (id ?? bgAt({ x: e.clientX, y: e.clientY }));
       g.current.moved = false;
       if (inGroup) setSelected(GROUP);
       else if (id) setSelected(id);
@@ -418,7 +483,7 @@ export default function Editor() {
     const [a0, b0] = start.pts;
     const [a1, b1] = pts;
     const ratio = Math.hypot(b1.x - a1.x, b1.y - a1.y) / Math.max(1, Math.hypot(b0.x - a0.x, b0.y - a0.y));
-    const rot = target === "bg" ? 0 : Math.atan2(b1.y - a1.y, b1.x - a1.x) - Math.atan2(b0.y - a0.y, b0.x - a0.x);
+    const rot = isBg(target) ? 0 : Math.atan2(b1.y - a1.y, b1.x - a1.x) - Math.atan2(b0.y - a0.y, b0.x - a0.x);
     const m0 = { x: (a0.x + b0.x) / 2, y: (a0.y + b0.y) / 2 };
     const m1 = { x: (a1.x + b1.x) / 2, y: (a1.y + b1.y) / 2 };
     // Keep the point under the fingers fixed while scaling/rotating.
@@ -443,7 +508,7 @@ export default function Editor() {
     if (!st.pointers.delete(e.pointerId)) return;
     if (st.pointers.size === 0) {
       // A tap on empty space clears the selection.
-      if (!st.moved && (st.target === "bg" || st.target === null)) setSelected(null);
+      if (!st.moved && (isBg(st.target) || st.target === null)) setSelected(null);
       st.target = null;
       st.start = null;
       setGuides({ v: false, h: false });
@@ -517,6 +582,44 @@ export default function Editor() {
     });
   }
 
+  // ---- Edit a generated sticker (finisher card) in place ----
+  // The selected sticker, or the only editable sticker in the selected group.
+  const editable =
+    sel?.edit
+      ? sel
+      : selected === GROUP && groupMembers.filter((s) => s.edit).length === 1
+        ? groupMembers.find((s) => s.edit)!
+        : null;
+  const [editDraft, setEditDraft] = useState<CardSettings | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
+
+  function openEdit() {
+    if (!editable?.edit) return;
+    const { time, pr, metrics } = editable.edit;
+    setEditDraft({ time, pr, metrics });
+    setSheet("edit");
+  }
+
+  async function applyEdit() {
+    if (!editable?.edit || !editDraft) return;
+    setEditBusy(true);
+    try {
+      const source = { ...editable.edit, ...editDraft };
+      const layer = await renderFinisherCard(source.run, source);
+      const target = editable;
+      setStickers((list) => {
+        if (!list.some((x) => x.id !== target.id && x.src === target.src)) URL.revokeObjectURL(target.src);
+        // Keep position, rotation and on-screen width; height follows the new content.
+        return list.map((x) =>
+          x.id === target.id ? { ...x, ...layer, scale: (x.scale * x.nw) / layer.nw, edit: source } : x,
+        );
+      });
+      setSheet(null);
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
   function cycleOpacity(id: string) {
     setStickers((s) => s.map((x) => (x.id === id ? { ...x, opacity: x.opacity <= 0.25 ? 1 : x.opacity - 0.25 } : x)));
   }
@@ -529,12 +632,15 @@ export default function Editor() {
 
   // ---- Export ----
   const [exported, setExported] = useState<{ file: File; url: string } | null>(null);
-  const maxMult = maxMultiplier(format, bg);
+  const backgrounds = panes(format, split)
+    .map((pane, i) => ({ bg: i === 0 ? bg : bg2, pane }))
+    .filter((x): x is { bg: Background; pane: Rect } => !!x.bg);
+  const maxMult = maxMultiplier(format, backgrounds.map((x) => x.bg));
 
   async function doExport(mult: number) {
     setBusy(true);
     try {
-      const blob = await renderImage(format, bg, stickers, mult);
+      const blob = await renderImage(format, backgrounds, split, stickers, mult);
       const file = new File([blob], `paceframe-${format.id}-${Date.now()}.png`, { type: "image/png" });
       if (exported) URL.revokeObjectURL(exported.url);
       setExported({ file, url: URL.createObjectURL(blob) });
@@ -570,7 +676,7 @@ export default function Editor() {
     setSheet(null);
   }
 
-  const empty = !bg && stickers.length === 0;
+  const empty = !bg && !bg2 && stickers.length === 0;
 
   return (
     <div className="fixed inset-0 flex flex-col bg-[#0b0b0c] text-white select-none">
@@ -606,19 +712,51 @@ export default function Editor() {
             className="relative touch-none overflow-hidden rounded-xl bg-[#1a1a1d] shadow-2xl"
             style={{ width: dispW, height: dispW * (format.h / format.w) }}
           >
-            {bg && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={bg.src}
-                alt=""
-                draggable={false}
-                className="pointer-events-none absolute max-w-none"
-                style={{
-                  width: bg.nw * bg.scale * k,
-                  height: bg.nh * bg.scale * k,
-                  left: (bg.x - (bg.nw * bg.scale) / 2) * k,
-                  top: (bg.y - (bg.nh * bg.scale) / 2) * k,
-                }}
+            {panes(format, split).map((pane, i) => {
+              const b = i === 0 ? bg : bg2;
+              return (
+                // Each photo is clipped to its pane.
+                <div
+                  key={i}
+                  className="absolute overflow-hidden"
+                  style={{ left: pane.x * k, top: pane.y * k, width: pane.w * k, height: pane.h * k }}
+                >
+                  {b ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={b.src}
+                      alt=""
+                      draggable={false}
+                      className="pointer-events-none absolute max-w-none"
+                      style={{
+                        width: b.nw * b.scale * k,
+                        height: b.nh * b.scale * k,
+                        left: (b.x - (b.nw * b.scale) / 2 - pane.x) * k,
+                        top: (b.y - (b.nh * b.scale) / 2 - pane.y) * k,
+                      }}
+                    />
+                  ) : (
+                    split !== "none" && (
+                      <button
+                        onClick={() => pickPhoto(i as 0 | 1)}
+                        className="flex h-full w-full flex-col items-center justify-center gap-2 text-white/60 active:text-white"
+                      >
+                        <ImagePlus size={24} />
+                        <span className="text-xs font-semibold">{i === 0 ? "Then photo" : "Now photo"}</span>
+                      </button>
+                    )
+                  )}
+                </div>
+              );
+            })}
+            {split !== "none" && (
+              <div
+                className="pointer-events-none absolute bg-white"
+                style={
+                  split === "side"
+                    ? { left: (format.w / 2 - DIVIDER / 2) * k, top: 0, width: DIVIDER * k, height: "100%" }
+                    : { top: (format.h / 2 - DIVIDER / 2) * k, left: 0, height: DIVIDER * k, width: "100%" }
+                }
               />
             )}
 
@@ -683,9 +821,9 @@ export default function Editor() {
             {guides.v && <div className="pointer-events-none absolute inset-y-0 left-1/2 w-px bg-[#fc4c02]" />}
             {guides.h && <div className="pointer-events-none absolute inset-x-0 top-1/2 h-px bg-[#fc4c02]" />}
 
-            {!bg && stickers.length === 0 && (
+            {!bg && split === "none" && stickers.length === 0 && (
               <button
-                onClick={() => photoInput.current?.click()}
+                onClick={() => pickPhoto(0)}
                 className="absolute inset-0 m-auto flex h-fit w-fit flex-col items-center gap-3 rounded-2xl p-6 text-white/70 active:text-white"
               >
                 <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white/10">
@@ -703,6 +841,7 @@ export default function Editor() {
         {selected === GROUP && grouped ? (
           <div className="flex items-center justify-around gap-1">
             <Tool label="Done" onClick={() => setSelected(null)} icon={Check} />
+            {editable && <Tool label="Edit card" onClick={openEdit} icon={PencilLine} />}
             <Tool label="Center" onClick={centerGroup} icon={Crosshair} />
             <Tool label="Layout" onClick={() => setSheet("layout")} icon={LayoutGrid} />
             {TUNABLE.includes(layout) && (
@@ -713,6 +852,7 @@ export default function Editor() {
         ) : sel ? (
           <div className="flex items-center justify-between gap-1">
             <Tool label="Done" onClick={() => setSelected(null)} icon={Check} />
+            {sel.edit && <Tool label="Edit" onClick={openEdit} icon={PencilLine} />}
             <Tool label="Back" onClick={() => reorder(sel.id, -1)} icon={SendToBack} />
             <Tool label="Front" onClick={() => reorder(sel.id, 1)} icon={BringToFront} />
             <Tool
@@ -726,7 +866,7 @@ export default function Editor() {
           </div>
         ) : (
           <div className="flex items-center justify-around gap-1">
-            <Tool label={bg ? "Photo" : "Add photo"} onClick={() => photoInput.current?.click()} icon={bg ? ImageIcon : ImagePlus} />
+            <Tool label={bg ? "Photo" : "Add photo"} onClick={() => setSheet("photo")} icon={bg ? ImageIcon : ImagePlus} />
             <Tool label="Stickers" onClick={() => stickerInput.current?.click()} icon={Plus} accent />
             <Tool label="Strava" onClick={() => setSheet("strava")} icon={Footprints} />
             <Tool
@@ -852,7 +992,16 @@ export default function Editor() {
               Done
             </button>
           </div>
-          {layout === "shape" ? (
+          {layout === "spiral" ? (
+            <div className="flex flex-col gap-2">
+              <Toggle
+                label={stickers.some((s) => s.weight) ? "Size by distance (longer runs bigger)" : "Size by distance (Strava routes only)"}
+                on={opts.bySize}
+                onClick={() => tune({ bySize: !opts.bySize })}
+              />
+              <Toggle label="Show spiral path" on={opts.path} onClick={() => tune({ path: !opts.path })} />
+            </div>
+          ) : layout === "shape" ? (
             <div className="flex flex-col gap-3">
               <div className="flex rounded-xl bg-white/5 p-1 text-sm">
                 {(
@@ -992,7 +1141,9 @@ export default function Editor() {
           )}
 
           <p className="mt-2 text-center text-[11px] text-white/40">
-            {layout === "shape"
+            {layout === "spiral"
+              ? `${stickers.filter((s) => !s.deco).length} stickers, first one in the center`
+              : layout === "shape"
               ? `${stickers.filter((s) => !s.deco).length} stickers in your shape`
               : layout === "timeline"
               ? `${stickers.filter((s) => !s.deco).length} stops in sticker order`
@@ -1004,7 +1155,65 @@ export default function Editor() {
 
       {sheet === "strava" && (
         <BottomSheet title="Strava" onClose={() => setSheet(null)}>
-          <StravaPanel hasWork={!empty} error={stravaError} onAdd={addLayers} />
+          <StravaPanel hasWork={!empty} error={stravaError} onAdd={addLayers} onThenNow={addThenNow} />
+        </BottomSheet>
+      )}
+
+      {sheet === "edit" && editable?.edit && editDraft && (
+        <BottomSheet title="Edit finisher card" onClose={() => setSheet(null)}>
+          <CardOptions
+            run={editable.edit.run}
+            units={editable.edit.units}
+            value={editDraft}
+            onChange={(patch) => setEditDraft((d) => (d ? { ...d, ...patch } : d))}
+          />
+          <button
+            onClick={applyEdit}
+            disabled={editBusy}
+            className="mt-4 h-12 w-full rounded-full bg-[#fc4c02] font-semibold active:brightness-90 disabled:opacity-40"
+          >
+            {editBusy ? "Updating…" : "Update card"}
+          </button>
+        </BottomSheet>
+      )}
+
+      {sheet === "photo" && (
+        <BottomSheet title="Background" onClose={() => setSheet(null)}>
+          <div className="mb-1 text-xs text-white/50">Layout</div>
+          <div className="mb-4 grid grid-cols-3 gap-2">
+            {(
+              [
+                ["none", "One photo"],
+                ["side", "Side by side"],
+                ["stacked", "Top & bottom"],
+              ] as const
+            ).map(([sp, label]) => (
+              <button
+                key={sp}
+                onClick={() => setSplit(sp)}
+                className={`flex flex-col items-center gap-2 rounded-2xl p-3 text-xs font-semibold ${split === sp ? "bg-white/15 ring-2 ring-[#fc4c02]" : "bg-white/5"}`}
+              >
+                <div className={`flex h-12 w-8 overflow-hidden rounded-md border-2 border-white/70 ${sp === "stacked" ? "flex-col" : ""}`}>
+                  <div className="flex-1 bg-white/25" />
+                  {sp !== "none" && <div className={`${sp === "side" ? "w-0.5" : "h-0.5"} bg-white`} />}
+                  {sp !== "none" && <div className="flex-1 bg-white/10" />}
+                </div>
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-col gap-2">
+            <button onClick={() => pickPhoto(0)} className="flex h-12 items-center gap-3 rounded-xl bg-white/5 px-4 text-sm font-medium active:bg-white/10">
+              <ImagePlus size={18} />
+              {split === "none" ? (bg ? "Change photo" : "Choose photo") : `${split === "side" ? "Left" : "Top"} photo (Then)`}
+            </button>
+            {split !== "none" && (
+              <button onClick={() => pickPhoto(1)} className="flex h-12 items-center gap-3 rounded-xl bg-white/5 px-4 text-sm font-medium active:bg-white/10">
+                <ImagePlus size={18} />
+                {split === "side" ? "Right" : "Bottom"} photo (Now)
+              </button>
+            )}
+          </div>
         </BottomSheet>
       )}
 

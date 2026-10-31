@@ -1,18 +1,20 @@
-import type { Background, Format, Sticker } from "./types";
+import { DIVIDER, type Background, type Format, type Rect, type Split, type Sticker } from "./types";
 
 // iOS Safari refuses canvases above ~16.7M pixels.
 const MAX_PIXELS = 16_000_000;
 
-/** Highest useful multiplier: enough to keep the photo's native resolution, capped by canvas limits. */
-export function maxMultiplier(fmt: Format, bg: Background | null): number {
-  const native = bg ? 1 / bg.scale : 1;
+/** Highest useful multiplier: enough to keep the photos' native resolution, capped by canvas limits. */
+export function maxMultiplier(fmt: Format, bgs: Background[]): number {
+  const native = Math.max(1, ...bgs.map((b) => 1 / b.scale));
   const cap = Math.sqrt(MAX_PIXELS / (fmt.w * fmt.h));
   return Math.max(1, Math.min(native, cap, 4));
 }
 
+/** Each background is drawn clipped to its pane; a white divider separates split photos. */
 export async function renderImage(
   fmt: Format,
-  bg: Background | null,
+  backgrounds: { bg: Background; pane: Rect }[],
+  split: Split,
   stickers: Sticker[],
   multiplier: number,
 ): Promise<Blob> {
@@ -27,10 +29,21 @@ export async function renderImage(
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, fmt.w, fmt.h);
 
-  if (bg) {
+  for (const { bg, pane } of backgrounds) {
     const w = bg.nw * bg.scale;
     const h = bg.nh * bg.scale;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(pane.x, pane.y, pane.w, pane.h);
+    ctx.clip();
     ctx.drawImage(bg.img, bg.x - w / 2, bg.y - h / 2, w, h);
+    ctx.restore();
+  }
+
+  if (split !== "none") {
+    ctx.fillStyle = "#fff";
+    if (split === "side") ctx.fillRect(fmt.w / 2 - DIVIDER / 2, 0, DIVIDER, fmt.h);
+    else ctx.fillRect(0, fmt.h / 2 - DIVIDER / 2, fmt.w, DIVIDER);
   }
 
   for (const s of stickers) {

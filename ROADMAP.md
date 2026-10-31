@@ -24,6 +24,8 @@ _Last updated: 2026-10-31_
 - **Arc:** stickers per arc, bend slider from ∪ to ∩ (±240°), tilt along the curve, inner arcs for overflow
 - **Timeline:** stickers in order along a line with node dots, vertical or horizontal, optional zigzag (auto-on for more than 8 stops); the line is a generated sticker that moves and exports with the group
 - **Scatter:** random tilt with **no overlaps**, auto-shrinks to fit
+- **Honeycomb:** offset rows packed like a honeycomb, adjustable columns, no overlaps
+- **Spiral:** first sticker in the center, winding outward; sizes grow along the spiral or follow run distance; optional dotted path
 - **Shape from image:** upload a logo or silhouette (e.g. a hand sign) and stickers take its shape
   - The shape is detected on-device, from transparency or by separating it from a plain background; **Invert** swaps shape and background
   - **Fill** spreads stickers evenly inside the shape (thin parts like fingers included), **Outline** places them along its edge, with no overlaps
@@ -55,12 +57,78 @@ _Last updated: 2026-10-31_
   - **Race finale:** choose the hero run (auto-picks the run marked as Race in Strava; the longest runs are suggested first). It's shown big at the end of the line with route, metrics, title and a RACE pill, and the RACE badge follows your pick
 - **Race badge** on per-run stickers for activities marked as Race
 - Big batches (more than 10 runs) skip per-activity detail requests to stay within Strava rate limits
+- **Race result:** pick a run (races and the longest runs listed first, or the run selected in the grid)
+  - **Finisher card:** FINISHER (+ optional PR) badges, race name (wraps to 2 lines), date, big finish time, route, and up to 6 **chosen metrics** (distance, avg pace, avg/max HR, elevation, cadence, calories, moving/elapsed time; only ones with data are offered)
+  - **Edit card in place:** select the card, or its group, and tap **Edit card** to change metrics, finish time or PR; it re-renders keeping position, width and rotation
+  - **Goal vs actual:** "GOAL 2:30:00 → FINISHED 2:26:10" with a margin badge: orange "−3:50 under goal", or grey "+6:10 over goal"
+  - Finish time can be **Elapsed** (closest to chip time) or **Moving**; both stickers are stacked automatically and stay movable
+- **Then vs Now:** pick an older and a recent run (searches the last 12 months; similar-distance runs within ±15% are suggested for "then")
+  - Compare **pace**, **time**, **distance** or **avg HR**; the difference badge is orange when improved ("−1:25 /km · 21% faster") and grey otherwise
+  - THEN / NOW stickers: label + month, route, the compared value large, distance · time
+  - **Versus** layout: one sticker per half and the badge on the divider
+- **Routes only** sticker mode: bold route outlines, no text, oldest first
+  - **Constellation:** routes in a Honeycomb (columns picked to fill the Story)
+  - **Spiral of runs:** oldest in the center, longer runs bigger, with a dotted spiral path
+  - Runs without GPS are skipped; **Select all shown** in the run grid selects every run in the current filter
+- **Split background:** one photo, **side by side**, or **top & bottom**, with a white divider; each half has its own photo that you pan and pinch separately; export clips each photo to its half at full quality
 - **km / miles** toggle
 
 ### Platform
 - Next.js 16 App Router, React 19, Tailwind 4, TypeScript, lucide-react icons
 - No canvas or gesture libraries; all rendering is custom
 - LAN dev origins allowed for phone testing
+
+---
+
+## 🎬 Story styles by use case
+
+Ready-made story **styles**: one tap picks the runs, the stickers and the layout for a goal. **Effort:** 🟢 mostly reuses what's built · 🟡 needs new stickers or data · 🔴 new subsystem.
+
+### 1. "Look how far I've come": showing improvement over time
+
+| Style | What it shows | Effort |
+|---|---|---|
+| **Then vs Now** | Two runs side by side: "Jan · 6:45 /km" vs "Oct · 5:20 /km", with a big orange delta badge ("−1:25 /km") | ✅ **Shipped**, with split photos |
+| **Pace trend line** | A line chart of average pace (or distance) per week or month over the block, with the best point highlighted | 🟡 chart sticker |
+| **Same route, faster** | Every run on one recurring route (e.g. your Sunday loop), stacked oldest to newest with the time shrinking each time; the route is drawn once | 🟡 match runs by route similarity |
+| **PR ladder** | Personal bests as steps (5K → 10K → HM → FM) or one distance's PRs over time (28:10 → 25:42 → 23:58) | 🟡 Strava best efforts API |
+| **Weekly volume bars** | Weekly km as vertical bars across the training block (taper visible), with the race week in orange | 🟡 bar chart sticker; data already in Training timeline |
+| **Training timeline + trend** | Existing timeline with a small sparkline or "+38% volume" badge per phase (Base / Build / Peak / Taper) | 🟢 extends Timeline |
+| **Before/after photo split** | Two photos (first run vs latest), each with its stats sticker | ✅ **Shipped** (part of Then vs Now; split also available from the Photo button) |
+| **Streak / consistency** | "24 weeks in a row" with a GitHub-style calendar heatmap of run days | 🟡 heatmap sticker; Strava streak data |
+
+### 2. "I did it!": showing the race result
+
+| Style | What it shows | Effort |
+|---|---|---|
+| **Finisher card** | Big finish time, race name, distance, avg pace, the route, and a FINISHER / PR badge, in the style of a finisher certificate | ✅ **Shipped** |
+| **Medal frame** | Your medal or bib photo as background, stats arranged around it (Frame layout) | 🟢 needs the Frame layout |
+| **Splits story** | Per-km splits as bars (negative split highlighted), fastest and slowest km labeled | 🟡 splits from activity detail |
+| **Race profile** | Elevation profile with the "wall" (e.g. km 30–35) marked and pace overlaid | 🟡 activity streams API |
+| **Goal vs actual** | "Goal 2:00:00 → Finished 1:57:42" with the margin highlighted; the user types the goal | ✅ **Shipped** |
+| **Road to race** | Training timeline ending in the race finale (**shipped**), plus total block stats (19 weeks · 712 km · 84 runs) as a header | 🟢 add a summary header |
+| **HR / effort zones** | Time in each heart-rate zone as a stacked bar | 🟡 zones + streams API |
+| **Animated finish** | The route draws itself, then the time counts up to the finish time (video export) | 🔴 animated export |
+
+### 3. "Look at all my runs": showing multiple runs creatively
+
+| Style | What it shows | Effort |
+|---|---|---|
+| **Route constellation** | Every route as a small outline, no text, arranged in a grid or honeycomb; it reads like a pattern or art piece | ✅ **Shipped** |
+| **Route overlay** | All routes drawn on top of each other at true geographic scale (thin, semi-transparent), showing your "home turf" heatmap | 🟡 shared-projection overlay sticker |
+| **Shape from image** | Runs filling a logo, number or silhouette (**shipped**); add text-to-shape (e.g. your bib number or "21K") | 🟢 shipped; text-to-shape is 🟡 |
+| **Calendar month** | A month grid with each day's run route in its cell and rest days blank | 🟡 Calendar layout |
+| **Distance number** | Runs fill the outline of the total, e.g. "142" km for the month | 🟡 Number layout |
+| **Year in review / wrapped** | Total km, runs, longest run, fastest pace, favorite day and time of day, top route; one hero stat per sticker in a bold layout | 🟡 aggregate stats stickers |
+| **Spiral of runs** | Oldest runs in the center, newest outside, sized by distance | ✅ **Shipped** |
+| **Collage of photos** | Runs that have Strava photos shown as polaroids with mini stats | 🔴 Strava photos API + multi-photo |
+| **Random memory** | "5 random runs from this year" (**shipped**: Random pick) in Scatter or Polaroid style | 🟢 shipped; add a polaroid frame style |
+
+### Suggested build order
+1. ~~**Finisher card** and **Goal vs actual**~~ ✅ shipped
+2. **Weekly volume bars** (~~Then vs Now~~ ✅ shipped): the clearest "improvement" story; the data is already loaded.
+3. **Year in review** (~~Route constellation~~ and ~~Spiral~~ ✅ shipped): a high-shareability "creative" style.
+4. **Splits story**, **Race profile** and **Pace trend line**: one chart-sticker engine powers all three.
 
 ---
 
@@ -109,10 +177,8 @@ _Running-specific_
 
 _Expressive_
 - **Heart:** stickers along a heart outline
-- **Spiral:** outward from the center, growing in size; handles 20–50 stickers better than Scatter
 - **Wave:** a sine-wave row with adjustable height and wave count
 - **Diagonal / zigzag:** a slanted line across the frame for a "speed" feel
-- **Honeycomb:** offset rows, tighter than a grid, for dense route collages
 
 _Practical_
 - **Frame / border:** stickers around the edges, keeping the middle (you) clear
