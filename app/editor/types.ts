@@ -1,0 +1,34 @@
+export type FormatId = "story" | "post" | "square";
+
+export type Format = { id: FormatId; label: string; ratio: string; w: number; h: number };
+
+export const FORMATS: Format[] = [
+  { id: "story", label: "Story", ratio: "9:16", w: 1080, h: 1920 },
+  { id: "post", label: "Post", ratio: "4:5", w: 1080, h: 1350 },
+  { id: "square", label: "Square", ratio: "1:1", w: 1080, h: 1080 },
+];
+
+/** Shared transform for anything placed on the canvas. x/y are the center, in design units (output px at 1x). */
+export type Transform = { x: number; y: number; scale: number; rotation: number };
+
+export type ImageLayer = Transform & {
+  id: string;
+  src: string;
+  img: HTMLImageElement;
+  nw: number;
+  nh: number;
+};
+
+export type Sticker = ImageLayer & { opacity: number };
+
+export type Background = ImageLayer;
+
+export async function loadImage(file: Blob): Promise<{ src: string; img: HTMLImageElement; nw: number; nh: number }> {
+  const src = URL.createObjectURL(file);
+  const img = new Image();
+  img.src = src;
+  await img.decode();
+  return { src, img, nw: img.naturalWidth, nh: img.naturalHeight };
+}
+
+export const uid = () => Math.random().toString(36).slice(2, 10);
