@@ -33,6 +33,8 @@ _Last updated: 2026-10-31_
 - All layouts stay inside **Instagram's safe area**
 - **Groups:** a layout groups its stickers. Drag, pinch, rotate or recenter the whole group; ungroup to edit one sticker; "Group all" to regroup
 - Re-layout (e.g. changing columns) keeps the group where you placed it
+- **Edit one sticker inside a group:** double-tap it to select just that sticker (move, delete, recolor) without ungrouping; **Re-arrange** re-applies the layout to fill gaps
+- **Swap run:** replace the run in any Strava sticker with another run; it keeps its spot, size, design and color
 
 ### Export
 - **Instagram size** (exact 1080 px) or **full photo quality** (keeps the photo's native resolution, up to the iOS canvas limit)

@@ -7,7 +7,9 @@ import StravaPanel from "./StravaPanel";
 import InstallPrompt from "./InstallPrompt";
 import { isStandalone } from "./standalone";
 import CardOptions, { type CardSettings } from "./CardOptions";
-import { recipeHasRoute, renderFinisherCard, renderRecipe } from "./stravaStickers";
+import { recipeHasRoute, recipeRun, renderFinisherCard, renderRecipe, withRun } from "./stravaStickers";
+import SwapRun from "./SwapRun";
+import type { Activity } from "@/app/lib/activity";
 import RouteColor from "./RouteColor";
 import { DEFAULT_STYLE, paintFor, recolorPixels, toHex, type RouteStyle } from "./routeStyle";
 import { pathLine, shapeSilhouette, timelineLine } from "./decorations";
@@ -32,6 +34,8 @@ import {
   Minus,
   Move,
   Palette,
+  RefreshCw,
+  Replace,
   PencilLine,
   Plus,
   RotateCcw,
@@ -49,7 +53,7 @@ import { DIVIDER, FORMATS, loadImage, panes, uid, type Background, type Format, 
 type Target = "bg" | "bg2" | string;
 const isBg = (t: Target | null) => t === "bg" || t === "bg2";
 type Pt = { x: number; y: number };
-type Sheet = null | "layout" | "tune" | "export" | "format" | "strava" | "edit" | "photo" | "color";
+type Sheet = null | "layout" | "tune" | "export" | "format" | "strava" | "edit" | "photo" | "color" | "swap";
 
 const SNAP_PX = 10;
 const GROUP = "__group";
@@ -123,7 +127,7 @@ export default function Editor() {
   const k = dispW / format.w; // screen px per design unit
 
   // Latest state for gesture handlers.
-  const live = useRef({ bg, bg2, split, stickers, format, k, groupIds: [] as string[] });
+  const live = useRef({ bg, bg2, split, stickers, format, k, groupIds: [] as string[], selected: null as string | null });
 
   // Coming back from Strava OAuth (?strava=connected or ?strava_error=…): reopen the Strava sheet.
   const [stravaError, setStravaError] = useState<string | null>(null);
@@ -260,7 +264,7 @@ export default function Editor() {
   const [groupIds, setGroupIds] = useState<string[]>([]);
   const groupMembers = stickers.filter((s) => groupIds.includes(s.id));
   const grouped = groupMembers.length > 1;
-  live.current = { bg, bg2, split, stickers, format, k, groupIds };
+  live.current = { bg, bg2, split, stickers, format, k, groupIds, selected };
 
   // Ignores stale async decorations when the layout changes quickly (e.g. tapping through options).
   const decoRun = useRef(0);
@@ -392,7 +396,10 @@ export default function Editor() {
     pointers: Map<number, Pt>;
     start: Start | null;
     moved: boolean;
-  }>({ target: null, pointers: new Map(), start: null, moved: false });
+    /** Sticker under the first finger (for double-tap inside a group). */
+    tapId: string | null;
+    lastTap: { id: string; t: number } | null;
+  }>({ target: null, pointers: new Map(), start: null, moved: false, tapId: null, lastTap: null });
 
   const toDesign = (p: Pt): Pt => {
     const r = stageRef.current!.getBoundingClientRect();
@@ -439,6 +446,24 @@ export default function Editor() {
     g.current.start = target ? snapshot(target, [...pointers.values()].map(toDesign)) : null;
   };
 
+  /** Topmost sticker under a screen point (stickers sit under the group box, so hit-test by position). */
+  const stickerAt = (p: Pt): string | null => {
+    const d = toDesign(p);
+    const list = live.current.stickers;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const s = list[i];
+      if (s.deco) continue;
+      // Undo the sticker's rotation, then test against its box.
+      const r = (-s.rotation * Math.PI) / 180;
+      const dx = d.x - s.x;
+      const dy = d.y - s.y;
+      const lx = dx * Math.cos(r) - dy * Math.sin(r);
+      const ly = dx * Math.sin(r) + dy * Math.cos(r);
+      if (Math.abs(lx) <= (s.nw * s.scale) / 2 && Math.abs(ly) <= (s.nh * s.scale) / 2) return s.id;
+    }
+    return null;
+  };
+
   /** The background photo under a screen point (the touched half when split). */
   const bgAt = (p: Pt): Target | null => {
     const { bg, bg2, split, format } = live.current;
@@ -464,7 +489,10 @@ export default function Editor() {
     stageRef.current!.setPointerCapture(e.pointerId);
     if (g.current.pointers.size === 0) {
       const id = el.closest<HTMLElement>("[data-sticker]")?.dataset.sticker;
-      const inGroup = el.closest("[data-group]") || (id && live.current.groupIds.includes(id) && liveGroup().length > 1);
+      // A group member picked by double-tap moves on its own; otherwise touching a member moves the group.
+      const solo = id && live.current.selected === id;
+      const inGroup = !solo && (el.closest("[data-group]") || (id && live.current.groupIds.includes(id) && liveGroup().length > 1));
+      g.current.tapId = id ?? stickerAt({ x: e.clientX, y: e.clientY });
       g.current.target = inGroup ? GROUP : (id ?? bgAt({ x: e.clientX, y: e.clientY }));
       g.current.moved = false;
       if (inGroup) setSelected(GROUP);
@@ -529,6 +557,14 @@ export default function Editor() {
     if (st.pointers.size === 0) {
       // A tap on empty space clears the selection.
       if (!st.moved && (isBg(st.target) || st.target === null)) setSelected(null);
+      // Double-tap a sticker inside a group: select just that one.
+      if (!st.moved && st.tapId && live.current.groupIds.includes(st.tapId)) {
+        const now = Date.now();
+        if (st.lastTap?.id === st.tapId && now - st.lastTap.t < 400) {
+          setSelected(st.tapId);
+          st.lastTap = null;
+        } else st.lastTap = { id: st.tapId, t: now };
+      }
       st.target = null;
       st.start = null;
       setGuides({ v: false, h: false });
@@ -658,6 +694,40 @@ export default function Editor() {
     }
   }
 
+  // ---- Swap the run in a Strava sticker ----
+  const runOf = (s: Sticker | null) => (s?.recipe ? recipeRun(s.recipe) : null);
+  const [swapping, setSwapping] = useState(false);
+
+  async function swapRun(target: Sticker, a: Activity) {
+    if (!target.recipe) return;
+    setSwapping(true);
+    try {
+      const res = await fetch(`/api/strava/activities/${a.id}`);
+      const detail = res.ok ? ((await res.json()) as { activity: Activity }).activity : a;
+      const old = recipeRun(target.recipe);
+      const recipe = withRun(target.recipe, { ...detail, race: old?.race ? detail.race : false });
+      const layer = await renderRecipe(recipe, target.paint);
+      setStickers((list) => {
+        if (!list.some((x) => x.id !== target.id && x.src === target.src)) URL.revokeObjectURL(target.src);
+        return list.map((x) =>
+          x.id === target.id
+            ? {
+                ...x,
+                ...layer,
+                scale: (x.scale * x.nw) / layer.nw,
+                recipe,
+                edit: recipe.kind === "finisher" ? recipe.source : x.edit,
+                weight: x.weight !== undefined ? detail.distance : undefined,
+              }
+            : x,
+        );
+      });
+      setSheet(null);
+    } finally {
+      setSwapping(false);
+    }
+  }
+
   function removeSticker(id: string) {
     const s = stickers.find((x) => x.id === id);
     const rest = stickers.filter((x) => x.id !== id);
@@ -665,7 +735,7 @@ export default function Editor() {
     if (s?.original && !rest.some((x) => x.original?.src === s.original!.src)) URL.revokeObjectURL(s.original.src);
     setStickers(rest);
     setGroupIds((ids) => ids.filter((x) => x !== id));
-    setSelected(null);
+    setSelected(groupIds.filter((x) => x !== id && rest.some((r) => r.id === x)).length > 1 ? GROUP : null);
   }
 
   function reorder(id: string, dir: 1 | -1) {
@@ -938,8 +1008,9 @@ export default function Editor() {
       {/* Bottom toolbar */}
       <nav className="px-3 pt-2 pb-[max(env(safe-area-inset-bottom),12px)]">
         {selected === GROUP && grouped ? (
-          <div className="flex items-center justify-around gap-1">
+          <div className="-mx-3 flex items-center justify-between gap-1 overflow-x-auto px-3 [scrollbar-width:none]">
             <Tool label="Done" onClick={() => setSelected(null)} icon={Check} />
+            <Tool label="Re-arrange" onClick={() => arrange(layout, opts, true, stickers, format, false)} icon={RefreshCw} />
             {editable && <Tool label="Edit card" onClick={openEdit} icon={PencilLine} />}
             <Tool label="Colors" onClick={() => setSheet("color")} icon={Palette} />
             <Tool label="Center" onClick={centerGroup} icon={Crosshair} />
@@ -952,6 +1023,8 @@ export default function Editor() {
         ) : sel ? (
           <div className="-mx-3 flex items-center justify-between gap-1 overflow-x-auto px-3 [scrollbar-width:none]">
             <Tool label="Done" onClick={() => setSelected(null)} icon={Check} />
+            {groupIds.includes(sel.id) && grouped && <Tool label="Group" onClick={() => setSelected(GROUP)} icon={LayoutGrid} />}
+            {runOf(sel) && <Tool label="Swap run" onClick={() => setSheet("swap")} icon={Replace} />}
             {sel.edit && <Tool label="Edit" onClick={openEdit} icon={PencilLine} />}
             {colorable(sel) && <Tool label="Color" onClick={() => setSheet("color")} icon={Palette} />}
             <Tool label="Back" onClick={() => reorder(sel.id, -1)} icon={SendToBack} />
@@ -988,7 +1061,7 @@ export default function Editor() {
         )}
         <p className="mt-2 text-center text-[11px] text-white/40">
           {selected === GROUP && grouped
-            ? "Drag to move the whole group · pinch or corner handle to resize & rotate"
+            ? "Drag to move the whole group · double-tap a sticker to edit just that one"
             : sel
             ? "Drag to move · pinch or use the corner handle to resize & rotate"
             : stickers.length
@@ -1381,6 +1454,17 @@ export default function Editor() {
             Cancel
           </button>
         </div>
+      )}
+
+      {sheet === "swap" && sel && runOf(sel) && (
+        <BottomSheet title={swapping ? "Swapping…" : "Swap run"} onClose={() => setSheet(null)}>
+          <SwapRun
+            current={runOf(sel)!}
+            exclude={stickers.map((s) => runOf(s)?.id).filter((x): x is number => x !== undefined)}
+            units={sel.recipe && "units" in sel.recipe ? sel.recipe.units : "metric"}
+            onPick={(a) => swapRun(sel, a)}
+          />
+        </BottomSheet>
       )}
 
       {sheet === "export" && (

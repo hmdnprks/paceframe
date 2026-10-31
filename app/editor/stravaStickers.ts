@@ -866,6 +866,24 @@ export type Recipe =
   | { kind: "finisher"; source: FinisherSource }
   | { kind: "versus"; a: Activity; role: "then" | "now"; c: Compare; units: Units };
 
+/** The single run a recipe was made from (weeks summarize many runs, so they have none). */
+export function recipeRun(r: Recipe): Activity | null {
+  if (r.kind === "week") return null;
+  return r.kind === "finisher" ? r.source.run : r.a;
+}
+
+/** Same sticker design, different run. */
+export function withRun(r: Recipe, a: Activity): Recipe {
+  switch (r.kind) {
+    case "week":
+      return r;
+    case "finisher":
+      return { ...r, source: { ...r.source, run: a } };
+    default:
+      return { ...r, a };
+  }
+}
+
 /** Whether the sticker has a route that a color change would affect. */
 export function recipeHasRoute(r: Recipe) {
   switch (r.kind) {

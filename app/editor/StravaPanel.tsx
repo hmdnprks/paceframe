@@ -1352,7 +1352,7 @@ export default function StravaPanel({
 }
 
 /** Compact run row for pickers: route thumb, name (flag if marked as Race), date, distance. */
-function RunRow({ run: a, units, on, onClick }: { run: Activity; units: Units; on: boolean; onClick: () => void }) {
+export function RunRow({ run: a, units, on, onClick }: { run: Activity; units: Units; on: boolean; onClick: () => void }) {
   return (
     <button onClick={onClick} className={`flex items-center gap-2.5 rounded-lg p-1.5 text-left ${on ? "bg-white/10" : ""}`}>
       <div className="h-9 w-9 shrink-0 overflow-hidden rounded-md bg-[#101012]">{a.polyline && <RouteThumb polyline={a.polyline} />}</div>
@@ -1373,7 +1373,7 @@ function RunRow({ run: a, units, on, onClick }: { run: Activity; units: Units; o
 }
 
 /** Route preview as an SVG polyline fitted into a square. */
-function RouteThumb({ polyline }: { polyline: string }) {
+export function RouteThumb({ polyline }: { polyline: string }) {
   const d = useMemo(() => {
     const pts = decodePolyline(polyline);
     if (pts.length < 2) return "";
