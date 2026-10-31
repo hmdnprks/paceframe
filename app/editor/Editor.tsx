@@ -111,6 +111,8 @@ export default function Editor() {
   // Second photo when the background is split (right half, or bottom half).
   const [bg2, setBg2] = useState<Background | null>(null);
   const [split, setSplitState] = useState<Split>("none");
+  // Locked photos never move, even with nothing selected.
+  const [photoLocked, setPhotoLocked] = useState(false);
   const [stickers, setStickers] = useState<Sticker[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [sheet, setSheet] = useState<Sheet>(null);
@@ -132,7 +134,7 @@ export default function Editor() {
   const k = dispW / format.w; // screen px per design unit
 
   // Latest state for gesture handlers.
-  const live = useRef({ bg, bg2, split, stickers, format, k, groupIds: [] as string[], selected: null as string | null });
+  const live = useRef({ bg, bg2, split, stickers, format, k, groupIds: [] as string[], selected: null as string | null, photoLocked: false });
 
   // Coming back from Strava OAuth (?strava=connected or ?strava_error=…): reopen the Strava sheet.
   const [stravaError, setStravaError] = useState<string | null>(null);
@@ -276,7 +278,7 @@ export default function Editor() {
   const [groupIds, setGroupIds] = useState<string[]>([]);
   const groupMembers = stickers.filter((s) => groupIds.includes(s.id));
   const grouped = groupMembers.length > 1;
-  live.current = { bg, bg2, split, stickers, format, k, groupIds, selected };
+  live.current = { bg, bg2, split, stickers, format, k, groupIds, selected, photoLocked };
 
   // Ignores stale async decorations when the layout changes quickly (e.g. tapping through options).
   const decoRun = useRef(0);
@@ -410,8 +412,10 @@ export default function Editor() {
     moved: boolean;
     /** Sticker under the first finger (for double-tap inside a group). */
     tapId: string | null;
+    /** Touch started on empty space (not a sticker or the group box): a tap there deselects. */
+    onEmpty: boolean;
     lastTap: { id: string; t: number } | null;
-  }>({ target: null, pointers: new Map(), start: null, moved: false, tapId: null, lastTap: null });
+  }>({ target: null, pointers: new Map(), start: null, moved: false, tapId: null, lastTap: null, onEmpty: false });
 
   const toDesign = (p: Pt): Pt => {
     const r = stageRef.current!.getBoundingClientRect();
@@ -506,7 +510,18 @@ export default function Editor() {
       const solo = id && live.current.selected === id;
       const inGroup = !solo && (el.closest("[data-group]") || (id && live.current.groupIds.includes(id) && liveGroup().length > 1));
       g.current.tapId = id ?? stickerAt({ x: e.clientX, y: e.clientY });
-      g.current.target = inGroup ? GROUP : (id ?? bgAt({ x: e.clientX, y: e.clientY }));
+      g.current.onEmpty = !id && !inGroup;
+      // With a selection, touches on empty space keep editing it (easier to pinch small stickers), so the
+      // photo can't move by accident. The photo only moves when nothing is selected and it isn't locked.
+      const current = live.current.selected;
+      g.current.target = inGroup
+        ? GROUP
+        : (id ??
+          (current && (current !== GROUP || liveGroup().length > 1)
+            ? current
+            : live.current.photoLocked
+              ? null
+              : bgAt({ x: e.clientX, y: e.clientY })));
       g.current.moved = false;
       if (inGroup) setSelected(GROUP);
       else if (id) setSelected(id);
@@ -569,7 +584,7 @@ export default function Editor() {
     if (!st.pointers.delete(e.pointerId)) return;
     if (st.pointers.size === 0) {
       // A tap on empty space clears the selection.
-      if (!st.moved && (isBg(st.target) || st.target === null)) setSelected(null);
+      if (!st.moved && (st.onEmpty || isBg(st.target) || st.target === null)) setSelected(null);
       // Double-tap a sticker inside a group: select just that one.
       if (!st.moved && st.tapId && live.current.groupIds.includes(st.tapId)) {
         const now = Date.now();
@@ -592,7 +607,7 @@ export default function Editor() {
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const target = selected ?? (live.current.bg ? "bg" : null);
+      const target = selected ?? (live.current.bg && !live.current.photoLocked ? "bg" : null);
       const start = target && snapshot(target, []);
       if (!target || !start) return;
       setTarget(target, { ...start.t, scale: Math.max(0.02, start.t.scale * Math.exp(-e.deltaY * 0.0015)) }, start);
@@ -1198,7 +1213,7 @@ export default function Editor() {
             : sel
             ? "Drag to move · pinch or use the corner handle to resize & rotate"
             : stickers.length
-              ? `${stickers.length} sticker${stickers.length > 1 ? "s" : ""} · tap one to edit · drag/pinch the photo to reframe`
+              ? `${stickers.length} sticker${stickers.length > 1 ? "s" : ""} · tap one to edit · ${photoLocked ? "photo locked" : "drag/pinch the photo to reframe"}`
               : "Add sticker PNGs from your gallery, or make them from a Strava activity"}
         </p>
       </nav>
@@ -1561,6 +1576,11 @@ export default function Editor() {
               </button>
             )}
           </div>
+          {(bg || bg2) && (
+            <div className="mt-3">
+              <Toggle label="Lock photo (can't be moved or zoomed)" on={photoLocked} onClick={() => setPhotoLocked((v) => !v)} />
+            </div>
+          )}
         </BottomSheet>
       )}
 
