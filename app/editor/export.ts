@@ -10,13 +10,17 @@ export function maxMultiplier(fmt: Format, bgs: Background[]): number {
   return Math.max(1, Math.min(native, cap, 4));
 }
 
-/** Each background is drawn clipped to its pane; a white divider separates split photos. */
+/**
+ * Each background is drawn clipped to its pane; a white divider separates split photos.
+ * With a cut-out of the person, "behind" stickers go under it and the rest on top.
+ */
 export async function renderImage(
   fmt: Format,
   backgrounds: { bg: Background; pane: Rect }[],
   split: Split,
   stickers: Sticker[],
   multiplier: number,
+  cutout?: { img: HTMLImageElement; bg: Background; pane: Rect } | null,
 ): Promise<Blob> {
   const canvas = document.createElement("canvas");
   canvas.width = Math.round(fmt.w * multiplier);
@@ -46,7 +50,7 @@ export async function renderImage(
     else ctx.fillRect(0, fmt.h / 2 - DIVIDER / 2, fmt.w, DIVIDER);
   }
 
-  for (const s of stickers) {
+  const drawSticker = (s: Sticker) => {
     const w = s.nw * s.scale;
     const h = s.nh * s.scale;
     ctx.save();
@@ -55,6 +59,21 @@ export async function renderImage(
     ctx.rotate((s.rotation * Math.PI) / 180);
     ctx.drawImage(s.img, -w / 2, -h / 2, w, h);
     ctx.restore();
+  };
+
+  if (cutout) {
+    stickers.filter((s) => s.behind).forEach(drawSticker);
+    // The person, exactly over the photo (same position and zoom), clipped to the photo's pane.
+    const { bg, pane } = cutout;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(pane.x, pane.y, pane.w, pane.h);
+    ctx.clip();
+    ctx.drawImage(cutout.img, bg.x - (bg.nw * bg.scale) / 2, bg.y - (bg.nh * bg.scale) / 2, bg.nw * bg.scale, bg.nh * bg.scale);
+    ctx.restore();
+    stickers.filter((s) => !s.behind).forEach(drawSticker);
+  } else {
+    stickers.forEach(drawSticker);
   }
 
   return new Promise((resolve, reject) =>

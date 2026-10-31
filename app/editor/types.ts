@@ -54,6 +54,8 @@ export type Sticker = ImageLayer & {
   text?: TextStyle;
   /** Has no route (goal, difference badge): route colors skip it. */
   noRoute?: boolean;
+  /** Sits behind the person in the photo (the cut-out of them is drawn on top). */
+  behind?: boolean;
   /** Untouched pixels of a gallery sticker; recoloring always starts from these. */
   original?: { src: string; img: HTMLImageElement; nw: number; nh: number };
 };

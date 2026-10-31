@@ -4,7 +4,7 @@ import type { Split, Transform } from "./types";
 type Box = { nw: number; nh: number };
 type Rect = { x: number; y: number; w: number; h: number };
 
-export type LayoutId = "stack" | "corner" | "grid" | "arc" | "timeline" | "row" | "circle" | "hero" | "scatter" | "shape" | "versus" | "honeycomb" | "spiral" | "wrap";
+export type LayoutId = "stack" | "corner" | "grid" | "arc" | "timeline" | "row" | "circle" | "hero" | "scatter" | "shape" | "versus" | "honeycomb" | "spiral";
 
 export const LAYOUTS: { id: LayoutId; label: string; hint: string }[] = [
   { id: "stack", label: "Stack", hint: "Centered column" },
@@ -88,18 +88,6 @@ export type LayoutOptions = {
   bySize?: boolean;
   /** Spiral: draw a faint path through the stickers. */
   path?: boolean;
-  /** Wrap: angle of the tilted rows (degrees) and gap between stickers (fraction of their size). */
-  angle?: number;
-  spacing?: number;
-  /** Wrap: keep stickers off the person in the photo. */
-  avoidSubject?: boolean;
-  /** Wrap: one sticker big in the center. */
-  heroCenter?: boolean;
-  /** Wrap: hero size as a fraction of the canvas width. */
-  heroSize?: number;
-  /** Wrap (computed when arranging): areas to keep clear, and which sticker is the hero. */
-  avoid?: (x: number, y: number) => boolean;
-  heroIndex?: number;
   /** Versus: how the background is split (stickers go one per half, badge in between). */
   split?: Split;
   /** Shape: silhouette from an uploaded image. */
@@ -111,7 +99,7 @@ export type LayoutOptions = {
 };
 
 /** Layouts that open the tuning panel (columns, bend…) after being applied. */
-export const TUNABLE: LayoutId[] = ["grid", "arc", "timeline", "shape", "honeycomb", "spiral", "wrap"];
+export const TUNABLE: LayoutId[] = ["grid", "arc", "timeline", "shape", "honeycomb", "spiral"];
 export const DEFAULT_BEND = 100;
 
 export const MAX_COLS = 8;
@@ -421,104 +409,6 @@ export function placeAmong(
   return null;
 }
 
-/**
- * A dense field of tilted stickers that flows around what should stay visible: the person in the photo
- * (`avoid`) and an optional big hero sticker in the center. Cells shrink until every sticker fits.
- */
-function wrap(items: Box[], W: number, H: number, o: LayoutOptions): Transform[] {
-  const n = items.length;
-  const out: Transform[] = new Array(n);
-  const margin = W * 0.025;
-  const tilt = o.angle ?? 30;
-  const cos = Math.cos((tilt * Math.PI) / 180);
-  const sin = Math.sin((tilt * Math.PI) / 180);
-  const spacing = o.spacing ?? 0.12;
-
-  // Hero: big and upright, as close to the center as possible without covering the person
-  // (shrinking a little if needed). Its box, plus a margin, is then kept clear of other stickers.
-  const hi = o.heroIndex ?? -1;
-  let hero: { x0: number; x1: number; y0: number; y1: number } | null = null;
-  if (hi >= 0 && hi < n) {
-    const pad = W * 0.03;
-    let hs = fit(items[hi], W * (o.heroSize ?? 0.5), H * 0.6);
-    let spot = { x: W / 2, y: H / 2 };
-    if (o.avoid) {
-      const clearAt = (cx: number, cy: number, hw: number, hh: number) => {
-        for (let i = 0; i <= 6; i++)
-          for (let j = 0; j <= 6; j++) if (o.avoid!(cx - hw + (2 * hw * i) / 6, cy - hh + (2 * hh * j) / 6)) return false;
-        return true;
-      };
-      let found: { x: number; y: number } | null = null;
-      for (let attempt = 0; attempt < 8 && !found; attempt++, hs *= 0.88) {
-        const hw = (items[hi].nw * hs) / 2 + pad;
-        const hh = (items[hi].nh * hs) / 2 + pad;
-        const step = W * 0.03;
-        let best = Infinity;
-        for (let cy = margin + hh; cy <= H - margin - hh; cy += step)
-          for (let cx = margin + hw; cx <= W - margin - hw; cx += step) {
-            const d = Math.hypot(cx - W / 2, cy - H / 2);
-            if (d < best && clearAt(cx, cy, hw, hh)) {
-              best = d;
-              found = { x: cx, y: cy };
-            }
-          }
-      }
-      if (found) spot = found;
-      else hs = fit(items[hi], W * (o.heroSize ?? 0.5), H * 0.6); // no room anywhere: center at full size
-    }
-    out[hi] = { x: spot.x, y: spot.y, scale: hs, rotation: 0 };
-    const hw = (items[hi].nw * hs) / 2 + pad;
-    const hh = (items[hi].nh * hs) / 2 + pad;
-    hero = { x0: spot.x - hw, x1: spot.x + hw, y0: spot.y - hh, y1: spot.y + hh };
-  }
-  const blocked = (x: number, y: number) =>
-    x < margin ||
-    y < margin ||
-    x > W - margin ||
-    y > H - margin ||
-    (!!hero && x > hero.x0 && x < hero.x1 && y > hero.y0 && y < hero.y1) ||
-    (o.avoid?.(x, y) ?? false);
-
-  const rest = items.map((_, i) => i).filter((i) => i !== hi);
-  if (!rest.length) return out;
-
-  // Free cells of a grid rotated by `tilt`, in reading order along the tilted rows.
-  const slots = (cs: number) => {
-    const pitch = cs * (1 + spacing);
-    const R = Math.hypot(W, H) / 2 + pitch;
-    const h = cs / 2;
-    const corners = [
-      [0, 0],
-      [h, h],
-      [h, -h],
-      [-h, h],
-      [-h, -h],
-    ];
-    const free: { x: number; y: number }[] = [];
-    for (let v = -R; v <= R; v += pitch)
-      for (let u = -R; u <= R; u += pitch) {
-        const x = W / 2 + u * cos - v * sin;
-        const y = H / 2 + u * sin + v * cos;
-        if (corners.every(([du, dv]) => !blocked(x + du * cos - dv * sin, y + du * sin + dv * cos))) free.push({ x, y });
-      }
-    return free;
-  };
-
-  let cs = Math.sqrt((W * H) / rest.length);
-  let free = slots(cs);
-  for (let i = 0; i < 60 && free.length < rest.length; i++) {
-    cs *= 0.94;
-    free = slots(cs);
-  }
-  if (!free.length) return grid(items, safeArea(W, H), defaultCols(n), W * 0.4);
-  // Spread the stickers evenly over the free cells when there are more cells than stickers.
-  rest.forEach((idx, k) => {
-    const p = free[Math.floor((k * free.length) / rest.length) % free.length];
-    out[idx] = { x: p.x, y: p.y, scale: fit(items[idx], cs * 0.94, cs * 0.94), rotation: tilt };
-  });
-  return out;
-}
-
 export function applyLayout(id: LayoutId, items: Box[], W: number, H: number, opts: LayoutOptions = {}): Transform[] {
   const rand = opts.rand ?? Math.random;
   const area = safeArea(W, H);
@@ -560,8 +450,6 @@ export function applyLayout(id: LayoutId, items: Box[], W: number, H: number, op
       return honeycomb(items, area, Math.min(opts.cols ?? honeyCols(n, W, H), n));
     case "spiral":
       return spiral(items, area, opts.weights, opts.bySize ?? false);
-    case "wrap":
-      return wrap(items, W, H, opts);
     case "versus":
       if (n < 2) return grid(items, area, 1, W * 0.5);
       return versus(items, W, H, opts.split ?? "side");

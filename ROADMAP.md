@@ -7,7 +7,7 @@ _Last updated: 2026-10-31_
 - [x] = built and live · [ ] = not built yet
 - **Effort** for open items: 🟢 mostly reuses what's built · 🟡 needs new stickers or data · 🔴 new subsystem
 
-**Progress:** 65/140 done · Editor 15/30 · Layouts 18/38 · Strava 14/19 · Story styles 7/25 · Platform 11/19 · Tech debt 0/9
+**Progress:** 64/140 done · Editor 16/31 · Layouts 17/37 · Strava 14/19 · Story styles 7/25 · Platform 10/19 · Tech debt 0/9
 
 ---
 
@@ -18,6 +18,7 @@ _Last updated: 2026-10-31_
 - [x] Background photo from the gallery, auto-fit to cover, drag and pinch to reframe
 - [x] **Split background:** one photo, side by side, or top & bottom, with a white divider; each half pans and zooms separately
 - [x] **Lock photo**, and the photo never moves while a sticker or group is selected
+- [x] **Stickers behind you:** "Behind you" on a sticker or group puts it behind the person in the photo (on-device cut-out with soft edges, follows the photo when moved, re-done when the photo changes, kept in export)
 - [x] Gallery stickers: pick many transparent PNGs at once (e.g. saved from Strava's share screen)
 - [x] Touch gestures: drag, two-finger resize/rotate, one-thumb corner handle; snapping to center lines and right angles
 - [x] Sticker tools: back / front, opacity, straighten, duplicate, delete
@@ -63,7 +64,6 @@ _Last updated: 2026-10-31_
 - [x] **Spiral:** center outward, size grows or follows distance, dotted path
 - [x] **Shape from image:** fill or outline any logo/silhouette, invert, optional silhouette
 - [x] **Versus:** one sticker per half, badge on the divider (Then vs Now)
-- [x] **Wrap around subject:** a tilted field of stickers that flows around the person in the photo (on-device person detection), adjustable angle and spacing, optional big hero sticker placed near the center but off the person
 - [x] All layouts stay inside Instagram's safe area
 - [ ] **Number:** stickers fill "5", "10", "21", "42" 🟡
 - [ ] **Calendar:** Mon–Sun grid, each run on its day 🟡
@@ -177,7 +177,7 @@ _Last updated: 2026-10-31_
 - [ ] **Animated stories:** MP4/WebM export with the route drawing itself 🔴
 - [ ] **Route on map tiles** (satellite/street basemap) 🔴
 - [ ] **Photo-from-route:** suggest the photo taken during the run (EXIF) 🟡
-- [x] **Smart layout:** detect the person and keep stickers off them (Wrap preset); other layouts could use it too 🟡
+- [ ] **Smart layout:** detect faces and keep stickers off them (a Wrap preset was tried and removed) 🟡
 - [ ] **Friends & clubs** recaps (needs Strava capacity approval) 🔴
 - [ ] **Other sources:** Garmin, Apple Health, GPX/FIT upload 🔴
 - [ ] **Native wrapper** (Capacitor) for direct "Share to Instagram Stories" 🔴
