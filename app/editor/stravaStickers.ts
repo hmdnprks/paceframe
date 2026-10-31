@@ -4,7 +4,8 @@ import { loadImage } from "./types";
 export type Units = "metric" | "imperial";
 export type StickerKey = "route" | "distance" | "pace" | "time" | "elevation" | "heartrate" | "cadence" | "calories" | "title";
 
-const ORANGE = "#fc4c02";
+// Matches Strava's own route sticker.
+const ROUTE_COLOR = "#FC5200";
 
 const isRun = (a: Activity) => /Run|Walk|Hike/.test(a.sport);
 
@@ -80,45 +81,36 @@ async function toLayer(canvas: HTMLCanvasElement) {
   return loadImage(blob);
 }
 
-function routeCanvas(polyline: string) {
+/** Strava-style route: thick orange line, no markers, transparent background. Longest side = `size`. */
+function routeCanvas(polyline: string, size = 1000) {
   const pts = decodePolyline(polyline);
   const lat0 = (pts.reduce((s, p) => s + p[0], 0) / pts.length) * (Math.PI / 180);
   const xy = pts.map(([la, ln]) => [ln * Math.cos(lat0), -la]);
   const xs = xy.map((p) => p[0]);
   const ys = xy.map((p) => p[1]);
   const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
-  const size = 1000;
-  const pad = 40;
+  const stroke = size * 0.03;
+  const pad = stroke;
   const span = Math.max(x1 - x0, y1 - y0) || 1;
   const f = (size - pad * 2) / span;
-  const w = Math.max(200, (x1 - x0) * f + pad * 2);
-  const h = Math.max(200, (y1 - y0) * f + pad * 2);
   const c = document.createElement("canvas");
-  c.width = Math.ceil(w);
-  c.height = Math.ceil(h);
+  c.width = Math.ceil(Math.max((x1 - x0) * f + pad * 2, stroke * 4));
+  c.height = Math.ceil(Math.max((y1 - y0) * f + pad * 2, stroke * 4));
+  const ox = (c.width - (x1 - x0) * f) / 2;
+  const oy = (c.height - (y1 - y0) * f) / 2;
   const ctx = c.getContext("2d")!;
-  const ox = (w - (x1 - x0) * f) / 2;
-  const oy = (h - (y1 - y0) * f) / 2;
-  const P = (p: number[]) => [ox + (p[0] - x0) * f, oy + (p[1] - y0) * f] as const;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
-  shadow(ctx);
-  ctx.strokeStyle = ORANGE;
-  ctx.lineWidth = 16;
+  ctx.strokeStyle = ROUTE_COLOR;
+  ctx.lineWidth = stroke;
   ctx.beginPath();
-  xy.forEach((p, i) => (i ? ctx.lineTo(...P(p)) : ctx.moveTo(...P(p))));
+  xy.forEach((p, i) => {
+    const x = ox + (p[0] - x0) * f;
+    const y = oy + (p[1] - y0) * f;
+    if (i) ctx.lineTo(x, y);
+    else ctx.moveTo(x, y);
+  });
   ctx.stroke();
-  // start/finish markers
-  for (const [p, fill] of [[xy[0], "#fff"], [xy[xy.length - 1], ORANGE]] as const) {
-    const [x, y] = P(p);
-    ctx.beginPath();
-    ctx.arc(x, y, 14, 0, Math.PI * 2);
-    ctx.fillStyle = fill;
-    ctx.fill();
-    ctx.lineWidth = 6;
-    ctx.strokeStyle = fill === "#fff" ? ORANGE : "#fff";
-    ctx.stroke();
-  }
   return c;
 }
 
@@ -167,4 +159,80 @@ export async function renderStravaSticker(key: StickerKey, a: Activity, units: U
       { text: stat.value, size: 120, weight: 800, alpha: 1 },
     ]),
   );
+}
+
+/**
+ * One sticker per run: route on top, chosen metrics in a centered grid below
+ * (label over value, like Strava's share overlay), optional title + date on top.
+ */
+export async function renderRunSticker(a: Activity, keys: Set<StickerKey>, units: Units) {
+  await document.fonts?.ready;
+  const family = fontFamily();
+  const W = 1000;
+  const stats = statsFor(a, units).filter((s) => keys.has(s.key) && s.key !== "route" && s.key !== "title");
+  const route = keys.has("route") && a.polyline ? routeCanvas(a.polyline, 900) : null;
+  const title = keys.has("title");
+
+  const cols = stats.length <= 3 ? Math.max(1, stats.length) : stats.length === 4 ? 2 : 3;
+  const rows = Math.ceil(stats.length / cols);
+  const cellW = W / cols;
+  const labelSize = 38;
+  // Shrink values together so the widest one fits its cell.
+  const m = document.createElement("canvas").getContext("2d")!;
+  let valueSize = cols === 1 ? 130 : 96;
+  m.font = `800 ${valueSize}px ${family}`;
+  const widest = Math.max(0, ...stats.map((s) => m.measureText(s.value).width));
+  if (widest > cellW * 0.92) valueSize = Math.floor((valueSize * cellW * 0.92) / widest);
+  const cellH = labelSize * 1.2 + valueSize * 1.1 + 24;
+
+  const pad = 30;
+  const gap = 40;
+  const titleH = title ? 84 * 1.15 + 44 * 1.2 + gap : 0;
+  const routeH = route ? Math.min(route.height, 900) : 0;
+  const routeW = route ? (route.width * routeH) / route.height : 0;
+  const statsH = rows * cellH;
+
+  const c = document.createElement("canvas");
+  c.width = W + pad * 2;
+  c.height = Math.ceil(pad * 2 + titleH + routeH + (route && stats.length ? gap : 0) + statsH);
+  const ctx = c.getContext("2d")!;
+  let y = pad;
+
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  if (title) {
+    shadow(ctx);
+    ctx.fillStyle = "#fff";
+    ctx.font = `800 84px ${family}`;
+    ctx.fillText(a.name, c.width / 2, y, W);
+    ctx.globalAlpha = 0.85;
+    ctx.font = `500 44px ${family}`;
+    ctx.fillText(formatDate(a.date), c.width / 2, y + 84 * 1.15, W);
+    ctx.globalAlpha = 1;
+    y += titleH;
+  }
+
+  if (route) {
+    ctx.shadowColor = "transparent";
+    ctx.drawImage(route, (c.width - routeW) / 2, y, routeW, routeH);
+    y += routeH + (stats.length ? gap : 0);
+  }
+
+  shadow(ctx);
+  ctx.fillStyle = "#fff";
+  stats.forEach((s, i) => {
+    const row = Math.floor(i / cols);
+    const inRow = Math.min(cols, stats.length - row * cols);
+    const rowLeft = pad + (W - inRow * cellW) / 2;
+    const cx = rowLeft + ((i % cols) + 0.5) * cellW;
+    const top = y + row * cellH;
+    ctx.globalAlpha = 0.85;
+    ctx.font = `600 ${labelSize}px ${family}`;
+    ctx.fillText(s.label.toUpperCase(), cx, top, cellW * 0.95);
+    ctx.globalAlpha = 1;
+    ctx.font = `800 ${valueSize}px ${family}`;
+    ctx.fillText(s.value, cx, top + labelSize * 1.2, cellW * 0.95);
+  });
+
+  return toLayer(c);
 }

@@ -35,6 +35,10 @@ export type Activity = {
   polyline?: string;
 };
 
+const RUN_TYPES = new Set(["Run", "TrailRun", "VirtualRun"]);
+
+export const isRunning = (sportType: string) => RUN_TYPES.has(sportType);
+
 export function toActivity(a: StravaActivity): Activity {
   const run = /Run|Walk|Hike/.test(a.sport_type);
   return {

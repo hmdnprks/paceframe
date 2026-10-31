@@ -4,6 +4,32 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { applyLayout, cascade, DEFAULT_BEND, defaultCols, LAYOUTS, MAX_COLS, TUNABLE, type LayoutId, type LayoutOptions } from "./layouts";
 import { maxMultiplier, renderImage } from "./export";
 import StravaPanel from "./StravaPanel";
+import {
+  BringToFront,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Contrast,
+  Copy,
+  Crosshair,
+  Download,
+  Footprints,
+  Group,
+  Image as ImageIcon,
+  ImagePlus,
+  LayoutGrid,
+  Maximize2,
+  Minus,
+  Move,
+  Plus,
+  RotateCcw,
+  SendToBack,
+  SlidersHorizontal,
+  Trash2,
+  Ungroup,
+  X,
+  type LucideIcon,
+} from "lucide-react";
 import { FORMATS, loadImage, uid, type Background, type Format, type Sticker, type Transform } from "./types";
 
 type Target = "bg" | string;
@@ -117,7 +143,11 @@ export default function Editor() {
     addLayers(await Promise.all([...files].map(loadImage)));
   }
 
-  function addLayers(loaded: Awaited<ReturnType<typeof loadImage>>[]) {
+  // Suggested grid columns for the last batch (e.g. one row per Strava activity).
+  const [hintCols, setHintCols] = useState<number | null>(null);
+
+  function addLayers(loaded: Awaited<ReturnType<typeof loadImage>>[], perRow?: number) {
+    setHintCols(perRow ?? null);
     setSheet(null);
     const placed = cascade(loaded, format.w, format.h, stickers.length);
     const added: Sticker[] = loaded.map((l, i) => ({ id: uid(), ...l, ...placed[i], opacity: 1 }));
@@ -164,7 +194,7 @@ export default function Editor() {
   function pickLayout(id: LayoutId) {
     if (!TUNABLE.includes(id)) return arrange(id);
     const n = stickers.length;
-    const o = { ...opts, cols: id === "arc" ? Math.min(n, 5) : defaultCols(n) };
+    const o = { ...opts, cols: Math.min(hintCols ?? (id === "arc" ? 5 : defaultCols(n)), n, MAX_COLS) };
     setOpts(o);
     arrange(id, o);
   }
@@ -460,14 +490,14 @@ export default function Editor() {
         >
           <span>{format.label}</span>
           <span className="text-white/50">{format.ratio}</span>
-          <Icon d="M6 9l6 6 6-6" />
+          <ChevronDown size={16} className="text-white/60" />
         </button>
         <button
           disabled={empty}
           onClick={() => setSheet("export")}
           className="flex h-10 items-center gap-1.5 rounded-full bg-[#fc4c02] px-5 text-sm font-semibold active:brightness-90 disabled:opacity-30"
         >
-          <Icon d="M12 4v12m0 0l-5-5m5 5l5-5M5 20h14" />
+          <Download size={16} strokeWidth={2.5} />
           Export
         </button>
       </header>
@@ -525,7 +555,7 @@ export default function Editor() {
                       className="absolute -right-5 -bottom-5 flex h-10 w-10 touch-none items-center justify-center"
                     >
                       <div className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-black shadow-lg">
-                        <Icon d="M15 4h5v5M9 20H4v-5M20 4l-7 7M4 20l7-7" size={14} />
+                        <Maximize2 size={14} strokeWidth={2.5} />
                       </div>
                     </div>
                   </>
@@ -551,7 +581,7 @@ export default function Editor() {
                     className="absolute -right-5 -bottom-5 flex h-10 w-10 touch-none items-center justify-center"
                   >
                     <div className="flex h-7 w-7 items-center justify-center rounded-full bg-white text-black shadow-lg">
-                      <Icon d="M15 4h5v5M9 20H4v-5M20 4l-7 7M4 20l7-7" size={14} />
+                      <Maximize2 size={14} strokeWidth={2.5} />
                     </div>
                   </div>
                 </div>
@@ -567,7 +597,7 @@ export default function Editor() {
                 className="absolute inset-0 m-auto flex h-fit w-fit flex-col items-center gap-3 rounded-2xl p-6 text-white/70 active:text-white"
               >
                 <div className="flex h-16 w-16 items-center justify-center rounded-full bg-white/10">
-                  <Icon d="M4 7h3l2-3h6l2 3h3v13H4zM12 17a4 4 0 100-8 4 4 0 000 8z" size={28} />
+                  <ImagePlus size={28} />
                 </div>
                 <span className="text-sm font-medium">Choose a photo</span>
               </button>
@@ -580,44 +610,44 @@ export default function Editor() {
       <nav className="px-3 pt-2 pb-[max(env(safe-area-inset-bottom),12px)]">
         {selected === GROUP && grouped ? (
           <div className="flex items-center justify-around gap-1">
-            <Tool label="Done" onClick={() => setSelected(null)} d="M5 12l5 5L20 7" />
-            <Tool label="Center" onClick={centerGroup} d="M12 3v4M12 17v4M3 12h4M17 12h4M12 9a3 3 0 100 6 3 3 0 000-6z" />
-            <Tool label="Layout" onClick={() => setSheet("layout")} d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" />
+            <Tool label="Done" onClick={() => setSelected(null)} icon={Check} />
+            <Tool label="Center" onClick={centerGroup} icon={Crosshair} />
+            <Tool label="Layout" onClick={() => setSheet("layout")} icon={LayoutGrid} />
             {TUNABLE.includes(layout) && (
-              <Tool label="Adjust" onClick={() => setSheet("tune")} d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0M14 4v4M8 10v4M16 16v4" />
+              <Tool label="Adjust" onClick={() => setSheet("tune")} icon={SlidersHorizontal} />
             )}
-            <Tool label="Ungroup" onClick={ungroup} d="M3 3h8v8H3zM13 13h8v8h-8z" />
+            <Tool label="Ungroup" onClick={ungroup} icon={Ungroup} />
           </div>
         ) : sel ? (
           <div className="flex items-center justify-between gap-1">
-            <Tool label="Done" onClick={() => setSelected(null)} d="M5 12l5 5L20 7" />
-            <Tool label="Back" onClick={() => reorder(sel.id, -1)} d="M12 5v14m0 0l-6-6m6 6l6-6" />
-            <Tool label="Front" onClick={() => reorder(sel.id, 1)} d="M12 19V5m0 0l-6 6m6-6l6 6" />
+            <Tool label="Done" onClick={() => setSelected(null)} icon={Check} />
+            <Tool label="Back" onClick={() => reorder(sel.id, -1)} icon={SendToBack} />
+            <Tool label="Front" onClick={() => reorder(sel.id, 1)} icon={BringToFront} />
             <Tool
               label={`${Math.round(sel.opacity * 100)}%`}
               onClick={() => cycleOpacity(sel.id)}
-              d="M12 3a9 9 0 100 18V3z"
+              icon={Contrast}
             />
-            <Tool label="Straighten" onClick={() => update(sel.id, { rotation: 0 })} d="M4 12h16M12 4v16" />
-            <Tool label="Copy" onClick={() => duplicate(sel)} d="M8 8h12v12H8zM4 16V4h12" />
-            <Tool label="Delete" onClick={() => removeSticker(sel.id)} d="M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13" danger />
+            <Tool label="Straighten" onClick={() => update(sel.id, { rotation: 0 })} icon={RotateCcw} />
+            <Tool label="Copy" onClick={() => duplicate(sel)} icon={Copy} />
+            <Tool label="Delete" onClick={() => removeSticker(sel.id)} icon={Trash2} danger />
           </div>
         ) : (
           <div className="flex items-center justify-around gap-1">
-            <Tool label={bg ? "Photo" : "Add photo"} onClick={() => photoInput.current?.click()} d="M4 7h3l2-3h6l2 3h3v13H4zM12 17a4 4 0 100-8 4 4 0 000 8z" />
-            <Tool label="Stickers" onClick={() => stickerInput.current?.click()} d="M12 5v14M5 12h14" accent />
-            <Tool label="Strava" onClick={() => setSheet("strava")} d="M10 3l-6 12h4l2-4 2 4h4zM14 15l2 4 2-4" />
+            <Tool label={bg ? "Photo" : "Add photo"} onClick={() => photoInput.current?.click()} icon={bg ? ImageIcon : ImagePlus} />
+            <Tool label="Stickers" onClick={() => stickerInput.current?.click()} icon={Plus} accent />
+            <Tool label="Strava" onClick={() => setSheet("strava")} icon={Footprints} />
             <Tool
               label="Layout"
               onClick={() => setSheet("layout")}
               disabled={stickers.length < 1}
-              d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"
+              icon={LayoutGrid}
             />
             {stickers.length > 1 && (
               <Tool
                 label={grouped ? "Select group" : "Group all"}
                 onClick={groupAll}
-                d="M3 3h18v18H3zM7 7h4v4H7zM13 13h4v4h-4z"
+                icon={Group}
               />
             )}
           </div>
@@ -673,7 +703,7 @@ export default function Editor() {
             className="mb-3 flex w-full items-center gap-3 rounded-2xl bg-white/5 p-4 text-left active:bg-white/10"
           >
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#fc4c02]/20 text-[#fc4c02]">
-              <Icon d="M5 9l-3 3 3 3M9 5l3-3 3 3M15 19l-3 3-3-3M19 9l3 3-3 3M2 12h20M12 2v20" />
+              <Move size={20} />
             </div>
             <div>
               <div className="font-semibold">Freeform</div>
@@ -710,10 +740,10 @@ export default function Editor() {
             <button
               onClick={() => tune({ cols: opts.cols - 1 })}
               disabled={opts.cols <= 1}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/10 text-xl disabled:opacity-30"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/10 disabled:opacity-30"
               aria-label="Fewer columns"
             >
-              −
+              <Minus size={18} />
             </button>
             <div className="flex flex-1 justify-between gap-1">
               {Array.from({ length: Math.min(MAX_COLS, stickers.length) }, (_, i) => i + 1).map((c) => (
@@ -729,10 +759,10 @@ export default function Editor() {
             <button
               onClick={() => tune({ cols: opts.cols + 1 })}
               disabled={opts.cols >= Math.min(MAX_COLS, stickers.length)}
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/10 text-xl disabled:opacity-30"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/10 disabled:opacity-30"
               aria-label="More columns"
             >
-              +
+              <Plus size={18} />
             </button>
           </div>
 
@@ -837,24 +867,16 @@ export default function Editor() {
   );
 }
 
-function Icon({ d, size = 18 }: { d: string; size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round">
-      <path d={d} />
-    </svg>
-  );
-}
-
 function Tool({
   label,
-  d,
+  icon: Glyph,
   onClick,
   disabled,
   accent,
   danger,
 }: {
   label: string;
-  d: string;
+  icon: LucideIcon;
   onClick: () => void;
   disabled?: boolean;
   accent?: boolean;
@@ -869,7 +891,7 @@ function Tool({
       <span
         className={`flex h-11 w-11 items-center justify-center rounded-full ${accent ? "bg-[#fc4c02] text-white" : "bg-white/10"} active:scale-95`}
       >
-        <Icon d={d} size={20} />
+        <Glyph size={20} strokeWidth={2} />
       </span>
       {label}
     </button>
@@ -885,7 +907,7 @@ function BottomSheet({ title, onClose, children }: { title: string; onClose: () 
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold">{title}</h2>
           <button onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10" aria-label="Close">
-            <Icon d="M6 6l12 12M18 6L6 18" />
+            <X size={18} />
           </button>
         </div>
         {children}
@@ -905,7 +927,7 @@ function ExportOption({ title, sub, onClick, disabled }: { title: string; sub: s
         <div className="font-semibold">{title}</div>
         <div className="text-xs text-white/50">{sub}</div>
       </div>
-      <Icon d="M9 6l6 6-6 6" />
+      <ChevronRight size={18} className="text-white/50" />
     </button>
   );
 }

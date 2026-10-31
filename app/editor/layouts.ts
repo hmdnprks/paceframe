@@ -134,6 +134,58 @@ function arc(items: Box[], area: Rect, cols: number, bend: number, tilt: boolean
   return fitInto(items, out, area);
 }
 
+/** Half-extents of a rotated sticker's axis-aligned box. */
+function extents(b: Box, scale: number, rotation: number) {
+  const r = (rotation * Math.PI) / 180;
+  const hw = (b.nw * scale) / 2;
+  const hh = (b.nh * scale) / 2;
+  const c = Math.abs(Math.cos(r));
+  const n = Math.abs(Math.sin(r));
+  return { ex: hw * c + hh * n, ey: hw * n + hh * c };
+}
+
+/**
+ * Random, tilted placement with no overlaps: drop stickers one by one (largest first) at random
+ * free spots; if one doesn't fit, shrink everything a bit and retry. Falls back to a grid.
+ */
+function scatter(items: Box[], area: Rect, rand: () => number): Transform[] {
+  const n = items.length;
+  const gap = area.w * 0.015;
+  const rotations = items.map(() => rand() * 24 - 12);
+  // Start from a cell size that leaves ~40% of the area free, then shrink until everything fits.
+  let cell = Math.min(area.w * 0.42, Math.sqrt((area.w * area.h * 0.6) / n));
+  const order = items.map((_, i) => i).sort((a, b) => items[b].nw * items[b].nh - items[a].nw * items[a].nh);
+
+  for (let attempt = 0; attempt < 25; attempt++, cell *= 0.92) {
+    const placed: { x: number; y: number; ex: number; ey: number }[] = [];
+    const out: Transform[] = new Array(n);
+    let ok = true;
+    for (const i of order) {
+      const scale = fit(items[i], cell, cell);
+      const { ex, ey } = extents(items[i], scale, rotations[i]);
+      if (ex * 2 > area.w || ey * 2 > area.h) {
+        ok = false;
+        break;
+      }
+      let spot: { x: number; y: number } | null = null;
+      for (let tries = 0; tries < 400 && !spot; tries++) {
+        const x = area.x + ex + rand() * (area.w - ex * 2);
+        const y = area.y + ey + rand() * (area.h - ey * 2);
+        const free = placed.every((p) => Math.abs(p.x - x) >= p.ex + ex + gap || Math.abs(p.y - y) >= p.ey + ey + gap);
+        if (free) spot = { x, y };
+      }
+      if (!spot) {
+        ok = false;
+        break;
+      }
+      placed.push({ ...spot, ex, ey });
+      out[i] = { ...spot, scale, rotation: rotations[i] };
+    }
+    if (ok) return out;
+  }
+  return grid(items, area, Math.ceil(Math.sqrt(n)), area.w * 0.4);
+}
+
 export function applyLayout(id: LayoutId, items: Box[], W: number, H: number, opts: LayoutOptions = {}): Transform[] {
   const rand = opts.rand ?? Math.random;
   const area = safeArea(W, H);
@@ -177,12 +229,7 @@ export function applyLayout(id: LayoutId, items: Box[], W: number, H: number, op
       return [hero, ...grid(rest, below, Math.min(3, rest.length), W * 0.3, "center")];
     }
     case "scatter":
-      return items.map((b) => ({
-        x: area.x + area.w * (0.2 + rand() * 0.6),
-        y: area.y + area.h * (0.12 + rand() * 0.76),
-        scale: fit(b, W * 0.32, W * 0.32),
-        rotation: rand() * 24 - 12,
-      }));
+      return scatter(items, area, rand);
   }
 }
 
