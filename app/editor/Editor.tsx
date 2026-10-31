@@ -11,6 +11,7 @@ import { recipeHasRoute, recipeHasText, recipeRun, renderFinisherCard, renderRec
 import TextStyleSheet from "./TextStyleSheet";
 import { DEFAULT_TEXT, type TextStyle } from "./textStyle";
 import SwapRun from "./SwapRun";
+import { detectSubject, subjectTest, type SubjectMask } from "./subject";
 import AddRuns from "./AddRuns";
 import type { RunSource } from "./StravaPanel";
 import type { Activity } from "@/app/lib/activity";
@@ -38,6 +39,8 @@ import {
   Minus,
   Move,
   Palette,
+  PersonStanding,
+  Star,
   RefreshCw,
   Replace,
   PencilLine,
@@ -259,7 +262,7 @@ export default function Editor() {
 
   // Last applied layout and its tunable options (columns, arc bend, tilt).
   const [layout, setLayout] = useState<LayoutId>("grid");
-  const [opts, setOpts] = useState<Required<Omit<LayoutOptions, "rand">>>({
+  const [opts, setOpts] = useState<Required<Omit<LayoutOptions, "rand" | "avoid" | "heroIndex">>>({
     cols: 2,
     bend: DEFAULT_BEND,
     tilt: true,
@@ -273,12 +276,56 @@ export default function Editor() {
     mask: null,
     shapeMode: "fill",
     silhouette: false,
+    angle: 30,
+    spacing: 0.12,
+    avoidSubject: true,
+    heroCenter: false,
+    heroSize: 0.45,
   });
   // Stickers that move together. Picking a layout groups everything it arranged.
   const [groupIds, setGroupIds] = useState<string[]>([]);
   const groupMembers = stickers.filter((s) => groupIds.includes(s.id));
   const grouped = groupMembers.length > 1;
   live.current = { bg, bg2, split, stickers, format, k, groupIds, selected, photoLocked };
+
+  // ---- Wrap around subject ----
+  const [subject, setSubject] = useState<SubjectMask | null>(null);
+  const [detecting, setDetecting] = useState(false);
+  // Refs too: arranging right after setting these must see the new values, not the previous render's.
+  const subjectRef = useRef<SubjectMask | null>(null);
+  const heroRef = useRef<string | null>(null);
+
+  async function pickWrap() {
+    if (!bg) return setToast("Add a photo first: the stickers wrap around the person in it.");
+    if (stickers.filter((s) => !s.deco).length < 2) return setToast("Add a few stickers first.");
+    let mask = subject?.src === bg.src ? subject : null;
+    if (!mask) {
+      setDetecting(true);
+      setToast("Finding the person in your photo… (first time downloads the detector, about 14 MB)");
+      try {
+        mask = await detectSubject(bg);
+      } catch {
+        setToast("Couldn't load the person detector. Check your connection and try again.");
+        return;
+      } finally {
+        setDetecting(false);
+      }
+      subjectRef.current = mask;
+      setSubject(mask);
+      if (!mask) setToast("Couldn't find a clear person, so stickers fill the whole photo. You can still set a hero.");
+      else setToast(null);
+    }
+    const o = { ...opts, avoidSubject: !!mask };
+    setOpts(o);
+    arrange("wrap", o);
+  }
+
+  function makeHero(id: string) {
+    heroRef.current = id;
+    const o = { ...opts, heroCenter: true };
+    setOpts(o);
+    arrange("wrap", o, true);
+  }
 
   // Ignores stale async decorations when the layout changes quickly (e.g. tapping through options).
   const decoRun = useRef(0);
@@ -287,7 +334,19 @@ export default function Editor() {
     // Layout decorations (timeline line) are rebuilt for every arrangement.
     base.filter((s) => s.deco).forEach((s) => URL.revokeObjectURL(s.src));
     const items = base.filter((s) => !s.deco);
-    const t = applyLayout(id, items, f.w, f.h, { ...o, weights: items.map((s) => s.weight ?? 0) });
+    const extra: Partial<LayoutOptions> = {};
+    if (id === "wrap") {
+      // Keep clear of the person, for the photo's current position and zoom.
+      const mask = subjectRef.current;
+      if (o.avoidSubject && mask && bg && mask.src === bg.src) extra.avoid = subjectTest(mask, bg);
+      if (o.heroCenter) {
+        const chosen = items.findIndex((s) => s.id === heroRef.current);
+        // Default hero: the longest run, else the first sticker.
+        const longest = items.reduce((best, s, i) => ((s.weight ?? 0) > (items[best]?.weight ?? 0) ? i : best), 0);
+        extra.heroIndex = chosen >= 0 ? chosen : longest;
+      }
+    }
+    const t = applyLayout(id, items, f.w, f.h, { ...o, ...extra, weights: items.map((s) => s.weight ?? 0) });
     let next = items.map((st, i) => ({ ...st, ...t[i] }));
     let dx = 0;
     let dy = 0;
@@ -1162,6 +1221,9 @@ export default function Editor() {
             <Tool label="Done" onClick={() => setSelected(null)} icon={Check} />
             {groupIds.includes(sel.id) && grouped && <Tool label="Group" onClick={() => setSelected(GROUP)} icon={LayoutGrid} />}
             {runOf(sel) && <Tool label="Swap run" onClick={() => setSheet("swap")} icon={Replace} />}
+            {layout === "wrap" && groupIds.includes(sel.id) && grouped && (
+              <Tool label="Set as hero" onClick={() => makeHero(sel.id)} icon={Star} />
+            )}
             {sel.edit && <Tool label="Edit" onClick={openEdit} icon={PencilLine} />}
             {colorable(sel) && <Tool label="Color" onClick={() => setSheet("color")} icon={Palette} />}
             {hasText(sel) && <Tool label="Text" onClick={() => setSheet("text")} icon={Type} />}
@@ -1329,6 +1391,19 @@ export default function Editor() {
               <div className="text-xs text-white/50">Upload a logo or silhouette, and stickers take its shape</div>
             </div>
           </button>
+          <button
+            onClick={pickWrap}
+            disabled={detecting}
+            className="mb-3 flex w-full items-center gap-3 rounded-2xl bg-white/5 p-4 text-left active:bg-white/10 disabled:opacity-50"
+          >
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#fc4c02]/20 text-[#fc4c02]">
+              <PersonStanding size={20} />
+            </div>
+            <div>
+              <div className="font-semibold">{detecting ? "Finding the person…" : "Wrap around subject"}</div>
+              <div className="text-xs text-white/50">A tilted field of stickers that flows around the person in your photo, with an optional hero in the center</div>
+            </div>
+          </button>
           <div className="grid grid-cols-3 gap-2.5">
             {LAYOUTS.map((l) => (
               <button
@@ -1354,7 +1429,67 @@ export default function Editor() {
               Done
             </button>
           </div>
-          {layout === "spiral" ? (
+          {layout === "wrap" ? (
+            <div className="flex flex-col gap-3">
+              <div>
+                <div className="mb-1 flex justify-between text-xs text-white/50">
+                  <span>Angle</span>
+                  <span className="tabular-nums text-white/80">{opts.angle}°</span>
+                </div>
+                <input
+                  type="range"
+                  min={-60}
+                  max={60}
+                  step={5}
+                  value={opts.angle}
+                  onChange={(e) => tune({ angle: Number(e.target.value) })}
+                  className="h-8 w-full accent-[#fc4c02]"
+                  aria-label="Angle"
+                />
+              </div>
+              <div>
+                <div className="mb-1 flex justify-between text-xs text-white/50">
+                  <span>Spacing</span>
+                  <span className="tabular-nums text-white/80">{Math.round(opts.spacing * 100)}%</span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={0.6}
+                  step={0.04}
+                  value={opts.spacing}
+                  onChange={(e) => tune({ spacing: Number(e.target.value) })}
+                  className="h-8 w-full accent-[#fc4c02]"
+                  aria-label="Spacing"
+                />
+              </div>
+              <Toggle
+                label={subject?.src === bg?.src && subject ? "Keep the person clear" : "Keep the person clear (no person found)"}
+                on={opts.avoidSubject && !!subject}
+                onClick={() => subject && tune({ avoidSubject: !opts.avoidSubject })}
+              />
+              <Toggle label="Big hero sticker (near the center, off the person)" on={opts.heroCenter} onClick={() => tune({ heroCenter: !opts.heroCenter })} />
+              {opts.heroCenter && (
+                <div>
+                  <div className="mb-1 flex justify-between text-xs text-white/50">
+                    <span>Hero size</span>
+                    <span className="tabular-nums text-white/80">{Math.round(opts.heroSize * 100)}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.25}
+                    max={0.8}
+                    step={0.05}
+                    value={opts.heroSize}
+                    onChange={(e) => tune({ heroSize: Number(e.target.value) })}
+                    className="h-8 w-full accent-[#fc4c02]"
+                    aria-label="Hero size"
+                  />
+                  <p className="mt-1 text-[11px] text-white/40">Pick the hero: double-tap a sticker → Set as hero.</p>
+                </div>
+              )}
+            </div>
+          ) : layout === "spiral" ? (
             <div className="flex flex-col gap-2">
               <Toggle
                 label={stickers.some((s) => s.weight) ? "Size by distance (longer runs bigger)" : "Size by distance (Strava routes only)"}
@@ -1503,7 +1638,9 @@ export default function Editor() {
           )}
 
           <p className="mt-2 text-center text-[11px] text-white/40">
-            {layout === "spiral"
+            {layout === "wrap"
+              ? `${stickers.filter((s) => !s.deco).length} stickers around ${subject ? "the person" : "the photo"}${opts.heroCenter ? " and the hero" : ""}`
+              : layout === "spiral"
               ? `${stickers.filter((s) => !s.deco).length} stickers, first one in the center`
               : layout === "shape"
               ? `${stickers.filter((s) => !s.deco).length} stickers in your shape`
