@@ -8,36 +8,43 @@ import {
   decodePolyline,
   duration as formatClock,
   formatDate,
-  renderRunSticker,
-  renderStravaSticker,
   COMPARES,
   compareDelta,
   compareValue,
   renderDeltaSticker,
-  renderFinisherCard,
-  renderRouteOnly,
-  renderVersusSticker,
+  recipeHasRoute,
+  renderRecipe,
   type Compare,
   renderGoalSticker,
-  renderWeekSticker,
   resultSeconds,
   statsFor,
   defaultCardMetrics,
   type FinisherSource,
+  type Recipe,
   type StickerKey,
   type Units,
 } from "./stravaStickers";
 import { honeyCols, type LayoutId, type LayoutOptions } from "./layouts";
 import CardOptions, { ToggleRow, type CardSettings } from "./CardOptions";
+import { paintFor, type Paint, type RouteStyle } from "./routeStyle";
+import { isStandalone } from "./standalone";
 import type { loadImage, Split } from "./types";
 
-type Layer = Awaited<ReturnType<typeof loadImage>> & { edit?: FinisherSource; weight?: number };
+type Layer = Awaited<ReturnType<typeof loadImage>> & {
+  edit?: FinisherSource;
+  weight?: number;
+  recipe?: Recipe;
+  paint?: Paint;
+  /** Generated without a route (goal, difference badge), so route colors never touch it. */
+  noRoute?: boolean;
+};
 type Athlete = { id: number; firstname: string; lastname: string; profile: string };
 
 const ERRORS: Record<string, string> = {
   access_denied: "You cancelled the Strava login.",
   missing_activity_permission: "Please allow access to your activities so we can read your runs.",
   invalid_state: "Login expired, please try again.",
+  invalid_or_expired: "That login code is invalid or expired (codes last 10 minutes). Connect again to get a new one.",
   token_exchange_failed: "Strava login failed. Check the client ID/secret in .env.local.",
 };
 
@@ -140,6 +147,7 @@ export default function StravaPanel({
   error,
   onAdd,
   onThenNow,
+  routeColors,
 }: {
   hasWork: boolean;
   error: string | null;
@@ -150,6 +158,8 @@ export default function StravaPanel({
   onAdd: (layers: Layer[], perRow?: number, layout?: LayoutId, layoutOpts?: Partial<LayoutOptions>) => void;
   /** Then vs Now: [then, now, badge] stickers, the background split, and optional photos per half. */
   onThenNow: (layers: Layer[], split: Split, photos: (File | null)[]) => void;
+  /** Route colors for new stickers (solid, gradient or multi-color). */
+  routeColors: RouteStyle;
 }) {
   const [athlete, setAthlete] = useState<Athlete | null | undefined>(undefined);
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -188,6 +198,38 @@ export default function StravaPanel({
   const [groupBy, setGroupBy] = useState<"week" | "run">("week");
   const [building, setBuilding] = useState(false);
   const [timelineInfo, setTimelineInfo] = useState<string | null>(null);
+  // Installed app: login code copied from Safari (see the callback's handoff).
+  const [codeDraft, setCodeDraft] = useState("");
+  const [redeeming, setRedeeming] = useState(false);
+
+  async function pasteCode() {
+    let code = codeDraft.trim();
+    if (!code) {
+      try {
+        code = (await navigator.clipboard.readText()).trim();
+      } catch {
+        return setMessage("Couldn't read the clipboard. Long-press the box and choose Paste.");
+      }
+    }
+    if (!code) return;
+    setRedeeming(true);
+    try {
+      const res = await fetch("/api/strava/redeem", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      if (!res.ok) return setMessage(ERRORS.invalid_or_expired);
+      const { athlete } = (await res.json()) as { athlete: Athlete };
+      setCodeDraft("");
+      setMessage(null);
+      setAthlete(athlete);
+      loadPage(1);
+    } finally {
+      setRedeeming(false);
+    }
+  }
+
   // Race result: finisher card and/or goal vs actual for one run.
   const [resultId, setResultId] = useState<number | null>(null);
   // Card metrics are null until the user changes them, so each race gets sensible defaults.
@@ -312,13 +354,27 @@ export default function StravaPanel({
     return runs.find((r) => r.id === heroChoice) ?? null;
   }
 
+  /**
+   * Render stickers in the chosen route colors. Gradients "across runs" and multi-color step per sticker
+   * that has a route, so stat-only stickers don't skip colors. Each layer keeps its recipe for recoloring.
+   */
+  function renderBatch(recipes: Recipe[]): Promise<Layer[]> {
+    const routed = recipes.filter(recipeHasRoute);
+    return Promise.all(
+      recipes.map(async (r) => {
+        const paint = paintFor(routeColors, Math.max(0, routed.indexOf(r)), routed.length);
+        return { ...(await renderRecipe(r, paint)), recipe: r, paint };
+      }),
+    );
+  }
+
   /** The race as a big sticker: route, chosen metrics, title + date, RACE pill. */
-  async function renderHero(hero: Activity) {
+  async function heroRecipe(hero: Activity): Promise<Recipe> {
     const res = await fetch(`/api/strava/activities/${hero.id}`);
     const detail = res.ok ? ((await res.json()) as { activity: Activity }).activity : hero;
     const heroKeys = new Set<StickerKey>([...keys, "route", "title"]);
     heroKeys.delete("date"); // the title already shows the date
-    return renderRunSticker({ ...detail, race: true }, heroKeys, units);
+    return { kind: "run", a: { ...detail, race: true }, keys: [...heroKeys], units };
   }
 
   async function openHeroPicker() {
@@ -378,12 +434,12 @@ export default function StravaPanel({
     if (!thenRun || !nowRun) return;
     setBuilding(true);
     try {
-      const layers = await Promise.all([
-        renderVersusSticker(thenRun, "then", compare, units),
-        renderVersusSticker(nowRun, "now", compare, units),
-        renderDeltaSticker(thenRun, nowRun, compare, units),
+      const pair = await renderBatch([
+        { kind: "versus", a: thenRun, role: "then", c: compare, units },
+        { kind: "versus", a: nowRun, role: "now", c: compare, units },
       ]);
-      onThenNow(layers, vsSplit, vsSplit === "none" ? [null, null] : vsPhotos);
+      const badge = { ...(await renderDeltaSticker(thenRun, nowRun, compare, units)), noRoute: true };
+      onThenNow([...pair, badge], vsSplit, vsSplit === "none" ? [null, null] : vsPhotos);
     } finally {
       setBuilding(false);
     }
@@ -407,8 +463,12 @@ export default function StravaPanel({
       const run = res.ok ? ((await res.json()) as { activity: Activity }).activity : resultRun;
       const settings = { ...cardSettings!, units };
       const layers: Layer[] = [];
-      if (withCard) layers.push({ ...(await renderFinisherCard(run, settings)), edit: { kind: "finisher", run, ...settings } });
-      if (withGoal && goalSecs > 0) layers.push(await renderGoalSticker(goalSecs, resultSeconds(run, settings.time)));
+      if (withCard) {
+        const source: FinisherSource = { kind: "finisher", run, ...settings };
+        const [card] = await renderBatch([{ kind: "finisher", source }]);
+        layers.push({ ...card, edit: source });
+      }
+      if (withGoal && goalSecs > 0) layers.push({ ...(await renderGoalSticker(goalSecs, resultSeconds(run, settings.time))), noRoute: true });
       if (!layers.length) return setMessage("Turn on the finisher card, or enter a goal time.");
       onAdd(layers, undefined, layers.length > 1 ? "stack" : undefined);
     } finally {
@@ -430,9 +490,9 @@ export default function StravaPanel({
         // Weekly totals use every run, so the distance filter doesn't apply here.
         const { first, last } = rangeDays();
         const weeks = buildWeeks(runs, first, last);
-        const layers = await Promise.all(weeks.map((w) => renderWeekSticker(w, units, !hero)));
-        if (hero) layers.push(await renderHero(hero));
-        onAdd(layers, undefined, "timeline", { hero: !!hero });
+        const recipes: Recipe[] = weeks.map((w) => ({ kind: "week", w, units, raceDetails: !hero }));
+        if (hero) recipes.push(await heroRecipe(hero));
+        onAdd(await renderBatch(recipes), undefined, "timeline", { hero: !!hero });
         return;
       }
       const r = FILTERS[units][filter];
@@ -494,25 +554,31 @@ export default function StravaPanel({
       if (timelineInfo) {
         const hero = detailed.find((a) => a.id === timelineHeroId);
         const ordered = detailed.filter((a) => a !== hero).sort((a, b) => a.date.localeCompare(b.date));
-        const layers = await Promise.all(ordered.map((a) => renderRunSticker({ ...a, race: false }, keys, units)));
-        if (hero) layers.push(await renderHero(hero));
-        onAdd(layers, undefined, "timeline", { hero: !!hero });
+        const recipes: Recipe[] = ordered.map((a) => ({ kind: "run", a: { ...a, race: false }, keys: [...keys], units }));
+        if (hero) recipes.push(await heroRecipe(hero));
+        onAdd(await renderBatch(recipes), undefined, "timeline", { hero: !!hero });
         return;
       }
       if (mode === "routes") {
         // Oldest first, so a spiral starts in the center; distance lets the spiral size by run length.
         const runs = detailed.filter((a) => a.polyline).sort((a, b) => a.date.localeCompare(b.date));
-        const layers = await Promise.all(runs.map(async (a) => ({ ...(await renderRouteOnly(a)), weight: a.distance })));
+        const rendered = await renderBatch(runs.map((a) => ({ kind: "routeOnly", a })));
+        const layers = rendered.map((l, i) => ({ ...l, weight: runs[i].distance }));
         if (routeStyle === "constellation") onAdd(layers, undefined, "honeycomb", { cols: honeyCols(layers.length) });
         else onAdd(layers, undefined, "spiral", { bySize: true });
         return;
       }
       if (mode === "combined") {
-        onAdd(await Promise.all(detailed.map((a) => renderRunSticker(a, keys, units))));
+        onAdd(await renderBatch(detailed.map((a) => ({ kind: "run", a, keys: [...keys], units }))));
         return;
       }
-      const jobs = detailed.flatMap((a) => statsFor(a, units).filter((s) => keys.has(s.key)).map((s) => renderStravaSticker(s.key, a, units)));
-      const layers = await Promise.all(jobs);
+      const layers = await renderBatch(
+        detailed.flatMap((a) =>
+          statsFor(a, units)
+            .filter((s) => keys.has(s.key))
+            .map((s): Recipe => ({ kind: "stat", key: s.key, a, units })),
+        ),
+      );
       const perRow = Math.max(1, Math.round(layers.length / detailed.length));
       onAdd(layers, detailed.length > 1 ? perRow : undefined);
     } finally {
@@ -608,11 +674,39 @@ export default function StravaPanel({
           </p>
         )}
         <a
-          href="/api/strava/login"
+          // The installed app uses a login flow that tries to come back to the app instead of Safari.
+          // (This panel only renders in the browser, so checking standalone here is safe.)
+          href={`/api/strava/login${isStandalone() ? "?app=1" : ""}`}
           className="flex h-12 w-full items-center justify-center rounded-full bg-[#fc4c02] font-semibold active:brightness-90"
         >
           Connect with Strava
         </a>
+        {isStandalone() && (
+          <div className="w-full rounded-2xl bg-white/5 p-3 text-left">
+            <div className="text-sm font-semibold">Logged in, but ended up in Safari?</div>
+            <p className="mb-2 text-xs text-white/50">
+              iPhone keeps the installed app separate from Safari. In Safari, tap <b>Copy code</b>, then come back here.
+            </p>
+            <div className="flex gap-2">
+              <input
+                value={codeDraft}
+                onChange={(e) => setCodeDraft(e.target.value)}
+                placeholder="Login code"
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                className="h-11 min-w-0 flex-1 rounded-xl bg-white/10 px-3 font-mono text-xs focus:ring-2 focus:ring-[#fc4c02] focus:outline-none"
+              />
+              <button
+                onClick={pasteCode}
+                disabled={redeeming}
+                className="h-11 shrink-0 rounded-xl bg-white px-4 text-sm font-semibold text-black disabled:opacity-40"
+              >
+                {redeeming ? "…" : codeDraft ? "Use code" : "Paste code"}
+              </button>
+            </div>
+          </div>
+        )}
         {footer}
       </div>
     );

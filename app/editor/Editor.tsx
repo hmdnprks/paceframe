@@ -5,8 +5,11 @@ import { applyLayout, cascade, DEFAULT_BEND, defaultCols, honeyCols, LAYOUTS, MA
 import { maxMultiplier, renderImage } from "./export";
 import StravaPanel from "./StravaPanel";
 import InstallPrompt from "./InstallPrompt";
+import { isStandalone } from "./standalone";
 import CardOptions, { type CardSettings } from "./CardOptions";
-import { renderFinisherCard } from "./stravaStickers";
+import { recipeHasRoute, renderFinisherCard, renderRecipe } from "./stravaStickers";
+import RouteColor from "./RouteColor";
+import { DEFAULT_STYLE, paintFor, recolorPixels, toHex, type RouteStyle } from "./routeStyle";
 import { pathLine, shapeSilhouette, timelineLine } from "./decorations";
 import { extractMask } from "./shape";
 import {
@@ -28,6 +31,7 @@ import {
   Maximize2,
   Minus,
   Move,
+  Palette,
   PencilLine,
   Plus,
   RotateCcw,
@@ -45,7 +49,7 @@ import { DIVIDER, FORMATS, loadImage, panes, uid, type Background, type Format, 
 type Target = "bg" | "bg2" | string;
 const isBg = (t: Target | null) => t === "bg" || t === "bg2";
 type Pt = { x: number; y: number };
-type Sheet = null | "layout" | "tune" | "export" | "format" | "strava" | "edit" | "photo";
+type Sheet = null | "layout" | "tune" | "export" | "format" | "strava" | "edit" | "photo" | "color";
 
 const SNAP_PX = 10;
 const GROUP = "__group";
@@ -123,13 +127,18 @@ export default function Editor() {
 
   // Coming back from Strava OAuth (?strava=connected or ?strava_error=…): reopen the Strava sheet.
   const [stravaError, setStravaError] = useState<string | null>(null);
+  // Login code to carry over to the installed app when iOS finished the Strava login in Safari.
+  const [handoff, setHandoff] = useState<string | null>(null);
   useEffect(() => {
     const q = new URLSearchParams(window.location.search);
     if (!q.has("strava") && !q.has("strava_error")) return;
     window.history.replaceState(null, "", window.location.pathname);
+    const code = q.get("handoff");
     queueMicrotask(() => {
       setStravaError(q.get("strava_error"));
-      setSheet("strava");
+      // Inside the installed app the session cookie is already here; only Safari needs the code.
+      if (code && !isStandalone()) setHandoff(code);
+      else setSheet("strava");
     });
   }, []);
 
@@ -442,6 +451,14 @@ export default function Editor() {
   };
 
   function onPointerDown(e: React.PointerEvent) {
+    if (picking) {
+      const hex = sampleAt({ x: e.clientX, y: e.clientY });
+      setPicking(false);
+      if (hex) setRouteColors((st) => ({ ...st, colors: st.colors.map((c, i) => (i === Math.min(colorSlot, st.colors.length - 1) ? hex : c)) }));
+      else setToast("Tap on the photo to pick a color.");
+      setSheet("color");
+      return;
+    }
     const el = e.target as HTMLElement;
     if (el.closest("[data-handle]")) return;
     stageRef.current!.setPointerCapture(e.pointerId);
@@ -565,10 +582,87 @@ export default function Editor() {
   // ---- Sticker actions ----
   const sel = stickers.find((s) => s.id === selected) ?? null;
 
+  // ---- Route colors ----
+  const [routeColors, setRouteColors] = useState<RouteStyle>(DEFAULT_STYLE);
+  const [colorSlot, setColorSlot] = useState(0);
+  const [picking, setPicking] = useState(false);
+  const [recoloring, setRecoloring] = useState(false);
+  const COLORS_KEY = "paceframe:route-colors";
+  // Remembered per device; loaded after mount (the page is prerendered without storage).
+  useEffect(() => {
+    let saved: RouteStyle | null = null;
+    try {
+      saved = JSON.parse(localStorage.getItem(COLORS_KEY) ?? "null");
+    } catch {}
+    if (saved?.colors?.length) queueMicrotask(() => setRouteColors(saved));
+  }, []);
+  useEffect(() => {
+    try {
+      localStorage.setItem(COLORS_KEY, JSON.stringify(routeColors));
+    } catch {}
+  }, [routeColors]);
+
+  /** Average color of a small patch of the background photo under a screen point. */
+  function sampleAt(p: Pt): string | null {
+    const target = bgAt(p);
+    const b = target === "bg2" ? bg2 : target === "bg" ? bg : null;
+    if (!b) return null;
+    const d = toDesign(p);
+    const ix = (d.x - (b.x - (b.nw * b.scale) / 2)) / b.scale;
+    const iy = (d.y - (b.y - (b.nh * b.scale) / 2)) / b.scale;
+    if (ix < 0 || iy < 0 || ix >= b.nw || iy >= b.nh) return null;
+    const c = document.createElement("canvas");
+    c.width = c.height = 1;
+    const ctx = c.getContext("2d", { willReadFrequently: true })!;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(b.img, Math.max(0, ix - 3), Math.max(0, iy - 3), 7, 7, 0, 0, 1, 1);
+    const [r, g, bl] = ctx.getImageData(0, 0, 1, 1).data;
+    return toHex(r, g, bl);
+  }
+
+  // Stickers a route color can change: Strava stickers with a route, and gallery stickers (their orange pixels).
+  const colorable = (s: Sticker) => !s.deco && !s.noRoute && (s.recipe ? recipeHasRoute(s.recipe) : true);
+
+  async function applyColors(scope: "selected" | "all") {
+    const pool = scope === "all" ? stickers : selected === GROUP ? groupMembers : sel ? [sel] : [];
+    const targets = pool.filter(colorable);
+    if (!targets.length) return setToast("No routes to recolor here.");
+    setRecoloring(true);
+    try {
+      const updated = await Promise.all(
+        targets.map(async (s, i) => {
+          const paint = paintFor(routeColors, i, targets.length);
+          if (s.recipe) return { id: s.id, layer: await renderRecipe(s.recipe, paint), paint, original: undefined };
+          const original = s.original ?? { src: s.src, img: s.img, nw: s.nw, nh: s.nh };
+          return { id: s.id, layer: await recolorPixels(original.img, paint), paint, original };
+        }),
+      );
+      setStickers((list) => {
+        const byId = new Map(updated.map((u) => [u.id, u]));
+        const next = list.map((x) => {
+          const u = byId.get(x.id);
+          if (!u) return x;
+          // Keep position, rotation and on-screen width.
+          return { ...x, ...u.layer, scale: (x.scale * x.nw) / u.layer.nw, paint: u.paint, original: u.original ?? x.original };
+        });
+        // Free replaced images nobody uses anymore (never the originals).
+        for (const old of list) {
+          if (!byId.has(old.id) || old.src === old.original?.src) continue;
+          if (!next.some((x) => x.src === old.src || x.original?.src === old.src)) URL.revokeObjectURL(old.src);
+        }
+        return next;
+      });
+      setSheet(null);
+    } finally {
+      setRecoloring(false);
+    }
+  }
+
   function removeSticker(id: string) {
     const s = stickers.find((x) => x.id === id);
     const rest = stickers.filter((x) => x.id !== id);
     if (s && !rest.some((x) => x.src === s.src)) URL.revokeObjectURL(s.src);
+    if (s?.original && !rest.some((x) => x.original?.src === s.original!.src)) URL.revokeObjectURL(s.original.src);
     setStickers(rest);
     setGroupIds((ids) => ids.filter((x) => x !== id));
     setSelected(null);
@@ -608,13 +702,15 @@ export default function Editor() {
     setEditBusy(true);
     try {
       const source = { ...editable.edit, ...editDraft };
-      const layer = await renderFinisherCard(source.run, source);
+      const layer = await renderFinisherCard(source.run, source, editable.paint);
       const target = editable;
       setStickers((list) => {
         if (!list.some((x) => x.id !== target.id && x.src === target.src)) URL.revokeObjectURL(target.src);
         // Keep position, rotation and on-screen width; height follows the new content.
         return list.map((x) =>
-          x.id === target.id ? { ...x, ...layer, scale: (x.scale * x.nw) / layer.nw, edit: source } : x,
+          x.id === target.id
+            ? { ...x, ...layer, scale: (x.scale * x.nw) / layer.nw, edit: source, recipe: { kind: "finisher", source } }
+            : x,
         );
       });
       setSheet(null);
@@ -845,6 +941,7 @@ export default function Editor() {
           <div className="flex items-center justify-around gap-1">
             <Tool label="Done" onClick={() => setSelected(null)} icon={Check} />
             {editable && <Tool label="Edit card" onClick={openEdit} icon={PencilLine} />}
+            <Tool label="Colors" onClick={() => setSheet("color")} icon={Palette} />
             <Tool label="Center" onClick={centerGroup} icon={Crosshair} />
             <Tool label="Layout" onClick={() => setSheet("layout")} icon={LayoutGrid} />
             {TUNABLE.includes(layout) && (
@@ -853,9 +950,10 @@ export default function Editor() {
             <Tool label="Ungroup" onClick={ungroup} icon={Ungroup} />
           </div>
         ) : sel ? (
-          <div className="flex items-center justify-between gap-1">
+          <div className="-mx-3 flex items-center justify-between gap-1 overflow-x-auto px-3 [scrollbar-width:none]">
             <Tool label="Done" onClick={() => setSelected(null)} icon={Check} />
             {sel.edit && <Tool label="Edit" onClick={openEdit} icon={PencilLine} />}
+            {colorable(sel) && <Tool label="Color" onClick={() => setSheet("color")} icon={Palette} />}
             <Tool label="Back" onClick={() => reorder(sel.id, -1)} icon={SendToBack} />
             <Tool label="Front" onClick={() => reorder(sel.id, 1)} icon={BringToFront} />
             <Tool
@@ -872,6 +970,7 @@ export default function Editor() {
             <Tool label={bg ? "Photo" : "Add photo"} onClick={() => setSheet("photo")} icon={bg ? ImageIcon : ImagePlus} />
             <Tool label="Stickers" onClick={() => stickerInput.current?.click()} icon={Plus} accent />
             <Tool label="Strava" onClick={() => setSheet("strava")} icon={Footprints} />
+            {stickers.some(colorable) && <Tool label="Colors" onClick={() => setSheet("color")} icon={Palette} />}
             <Tool
               label="Layout"
               onClick={() => setSheet("layout")}
@@ -916,6 +1015,43 @@ export default function Editor() {
       />
 
       <InstallPrompt />
+
+      {handoff && (
+        <BottomSheet title="Strava connected" onClose={() => setHandoff(null)}>
+          <div className="flex flex-col gap-3 text-sm">
+            <p className="text-white/70">
+              You started from the <b>Paceframe app</b> on your Home Screen, but iPhone finished the login here in Safari. To log in the
+              app too:
+            </p>
+            <ol className="list-decimal space-y-1 pl-5 text-white/70">
+              <li>
+                Tap <b>Copy code</b>
+              </li>
+              <li>Open Paceframe from your Home Screen</li>
+              <li>
+                Strava → <b>Paste code</b>
+              </li>
+            </ol>
+            <button
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(handoff);
+                  setToast("Code copied. Open Paceframe from your Home Screen (valid for 10 minutes).");
+                } catch {
+                  setToast("Couldn't copy automatically. Long-press the code below to copy it.");
+                }
+              }}
+              className="h-12 w-full rounded-full bg-[#fc4c02] font-semibold active:brightness-90"
+            >
+              Copy code
+            </button>
+            <p className="max-h-20 overflow-y-auto rounded-xl bg-white/5 p-2 font-mono text-[10px] break-all text-white/40 select-all">{handoff}</p>
+            <button onClick={() => (setHandoff(null), setSheet("strava"))} className="text-sm text-white/60">
+              Continue in Safari instead
+            </button>
+          </div>
+        </BottomSheet>
+      )}
 
       {toast && (
         <div className="fixed inset-x-4 top-[max(env(safe-area-inset-top),12px)] z-[60] rounded-2xl bg-white px-4 py-3 text-sm font-medium text-black shadow-xl">
@@ -1160,7 +1296,7 @@ export default function Editor() {
 
       {sheet === "strava" && (
         <BottomSheet title="Strava" onClose={() => setSheet(null)}>
-          <StravaPanel hasWork={!empty} error={stravaError} onAdd={addLayers} onThenNow={addThenNow} />
+          <StravaPanel hasWork={!empty} error={stravaError} onAdd={addLayers} onThenNow={addThenNow} routeColors={routeColors} />
         </BottomSheet>
       )}
 
@@ -1220,6 +1356,31 @@ export default function Editor() {
             )}
           </div>
         </BottomSheet>
+      )}
+
+      {sheet === "color" && (
+        <BottomSheet title="Route colors" onClose={() => setSheet(null)}>
+          <RouteColor
+            value={routeColors}
+            onChange={setRouteColors}
+            slot={colorSlot}
+            onSlot={setColorSlot}
+            canPick={!!(bg || bg2)}
+            onPickFromPhoto={() => (setSheet(null), setPicking(true))}
+            hasSelection={!!(selected === GROUP ? groupMembers.some(colorable) : sel && colorable(sel))}
+            busy={recoloring}
+            onApply={applyColors}
+          />
+        </BottomSheet>
+      )}
+
+      {picking && (
+        <div className="fixed inset-x-4 top-[max(env(safe-area-inset-top),12px)] z-[60] flex items-center justify-between gap-3 rounded-2xl bg-white px-4 py-3 text-sm font-medium text-black shadow-xl">
+          <span>Tap your photo to pick a color</span>
+          <button onClick={() => (setPicking(false), setSheet("color"))} className="font-semibold text-[#fc4c02]">
+            Cancel
+          </button>
+        </div>
       )}
 
       {sheet === "export" && (

@@ -1,4 +1,5 @@
 import type { Activity } from "@/app/lib/activity";
+import { DEFAULT_PAINT, mix, type Paint } from "./routeStyle";
 import { loadImage } from "./types";
 
 export type Units = "metric" | "imperial";
@@ -88,7 +89,7 @@ async function toLayer(canvas: HTMLCanvasElement) {
 }
 
 /** Strava-style route: thick orange line, no markers, transparent background. Longest side = `size`. */
-function routeCanvas(polyline: string, size = 1000, strokeRatio = 0.03) {
+function routeCanvas(polyline: string, size = 1000, strokeRatio = 0.03, paint: Paint = DEFAULT_PAINT) {
   const pts = decodePolyline(polyline);
   const lat0 = (pts.reduce((s, p) => s + p[0], 0) / pts.length) * (Math.PI / 180);
   const xy = pts.map(([la, ln]) => [ln * Math.cos(lat0), -la]);
@@ -107,16 +108,33 @@ function routeCanvas(polyline: string, size = 1000, strokeRatio = 0.03) {
   const ctx = c.getContext("2d")!;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
-  ctx.strokeStyle = ROUTE_COLOR;
   ctx.lineWidth = stroke;
-  ctx.beginPath();
-  xy.forEach((p, i) => {
-    const x = ox + (p[0] - x0) * f;
-    const y = oy + (p[1] - y0) * f;
-    if (i) ctx.lineTo(x, y);
-    else ctx.moveTo(x, y);
-  });
-  ctx.stroke();
+  const P = xy.map((p) => [ox + (p[0] - x0) * f, oy + (p[1] - y0) * f]);
+  if (paint.kind === "solid") {
+    ctx.strokeStyle = paint.color;
+    ctx.beginPath();
+    P.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)));
+    ctx.stroke();
+    return c;
+  }
+  // Gradient along the route, drawn as ~48 continuous color bands by distance from the start.
+  // (Stroking every tiny segment separately leaves beaded edges where the round caps overlap.)
+  const cum = [0];
+  for (let i = 1; i < P.length; i++) cum.push(cum[i - 1] + Math.hypot(P[i][0] - P[i - 1][0], P[i][1] - P[i - 1][1]));
+  const total = cum[cum.length - 1] || 1;
+  const BANDS = 48;
+  let i = 1;
+  for (let band = 0; band < BANDS && i < P.length; band++) {
+    const end = ((band + 1) / BANDS) * total;
+    ctx.strokeStyle = mix(paint.colors, (band + 0.5) / BANDS);
+    ctx.beginPath();
+    ctx.moveTo(P[i - 1][0], P[i - 1][1]);
+    while (i < P.length && cum[i - 1] < end) {
+      ctx.lineTo(P[i][0], P[i][1]);
+      i++;
+    }
+    ctx.stroke();
+  }
   return c;
 }
 
@@ -147,9 +165,9 @@ function textCanvas(lines: { text: string; size: number; weight: number; alpha: 
 }
 
 /** Render one sticker as a transparent PNG layer (sized for crisp export at full quality). */
-export async function renderStravaSticker(key: StickerKey, a: Activity, units: Units) {
+export async function renderStravaSticker(key: StickerKey, a: Activity, units: Units, paint: Paint = DEFAULT_PAINT) {
   await document.fonts?.ready;
-  if (key === "route") return toLayer(routeCanvas(a.polyline!));
+  if (key === "route") return toLayer(routeCanvas(a.polyline!, 1000, 0.03, paint));
   if (key === "title") {
     return toLayer(
       textCanvas([
@@ -171,12 +189,12 @@ export async function renderStravaSticker(key: StickerKey, a: Activity, units: U
  * One sticker per run: route on top, chosen metrics in a centered grid below
  * (label over value, like Strava's share overlay), optional title + date on top.
  */
-export async function renderRunSticker(a: Activity, keys: Set<StickerKey>, units: Units) {
+export async function renderRunSticker(a: Activity, keys: Set<StickerKey>, units: Units, paint: Paint = DEFAULT_PAINT) {
   await document.fonts?.ready;
   const family = fontFamily();
   const W = 1000;
   const stats = statsFor(a, units).filter((s) => keys.has(s.key) && s.key !== "route" && s.key !== "title");
-  const route = keys.has("route") && a.polyline ? routeCanvas(a.polyline, 900) : null;
+  const route = keys.has("route") && a.polyline ? routeCanvas(a.polyline, 900, 0.03, paint) : null;
   const title = keys.has("title");
 
   const cols = stats.length <= 3 ? Math.max(1, stats.length) : stats.length === 4 ? 2 : 3;
@@ -297,7 +315,7 @@ const monthDay = (d: Date) => d.toLocaleDateString(undefined, { month: "short", 
  * One week of a training block: long-run route on the left, totals on the right. Race week gets a RACE pill;
  * `raceDetails` adds a short distance · time line (skip it when the race has its own finale sticker).
  */
-export async function renderWeekSticker(w: Week, units: Units, raceDetails = true) {
+export async function renderWeekSticker(w: Week, units: Units, raceDetails = true, paint: Paint = DEFAULT_PAINT) {
   await document.fonts?.ready;
   const family = fontFamily();
   const len = units === "metric" ? 1000 : 1609.344;
@@ -306,7 +324,7 @@ export async function renderWeekSticker(w: Week, units: Units, raceDetails = tru
   const race = w.runs.find((r) => r.race);
   const long = [...w.runs].sort((a, b) => b.distance - a.distance)[0];
   const featured = race ?? long;
-  const route = featured?.polyline ? routeCanvas(featured.polyline, 300) : null;
+  const route = featured?.polyline ? routeCanvas(featured.polyline, 300, 0.03, paint) : null;
 
   const sameMonth = w.start.getUTCMonth() === w.end.getUTCMonth();
   const range = sameMonth
@@ -475,7 +493,7 @@ export type FinisherSource = {
 };
 
 /** Finisher card: badges, race name + date, big finish time, route, and a stats row. */
-export async function renderFinisherCard(a: Activity, opts: Omit<FinisherSource, "kind" | "run">) {
+export async function renderFinisherCard(a: Activity, opts: Omit<FinisherSource, "kind" | "run">, paint: Paint = DEFAULT_PAINT) {
   await document.fonts?.ready;
   const family = fontFamily();
   const W = 1000;
@@ -492,7 +510,7 @@ export async function renderFinisherCard(a: Activity, opts: Omit<FinisherSource,
   const m = document.createElement("canvas").getContext("2d")!;
   m.font = `800 76px ${family}`;
   const nameLines = wrap(m, a.name, W, 2);
-  const route = a.polyline ? routeCanvas(a.polyline, 560) : null;
+  const route = a.polyline ? routeCanvas(a.polyline, 560, 0.03, paint) : null;
   const routeH = route ? Math.min(route.height, 560) : 0;
   const routeW = route ? (route.width * routeH) / route.height : 0;
 
@@ -722,7 +740,7 @@ const monthYear = (iso: string) =>
   new Date(iso).toLocaleDateString(undefined, { month: "short", year: "numeric", timeZone: "UTC" }).toUpperCase();
 
 /** THEN / NOW sticker: label + month, route, the compared value big, distance · time small. */
-export async function renderVersusSticker(a: Activity, role: "then" | "now", c: Compare, units: Units) {
+export async function renderVersusSticker(a: Activity, role: "then" | "now", c: Compare, units: Units, paint: Paint = DEFAULT_PAINT) {
   await document.fonts?.ready;
   const family = fontFamily();
   const W = 760;
@@ -730,7 +748,7 @@ export async function renderVersusSticker(a: Activity, role: "then" | "now", c: 
   const len = units === "metric" ? 1000 : 1609.344;
   const unit = units === "metric" ? "km" : "mi";
   const value = compareValue(a, c, units);
-  const route = a.polyline ? routeCanvas(a.polyline, 420) : null;
+  const route = a.polyline ? routeCanvas(a.polyline, 420, 0.03, paint) : null;
   const routeH = route ? Math.min(route.height, 420) : 0;
   const routeW = route ? (route.width * routeH) / route.height : 0;
   const pillH = 60;
@@ -832,6 +850,51 @@ export async function renderDeltaSticker(then: Activity, now: Activity, c: Compa
 }
 
 /** Just the route, with a bolder line so it still reads when shrunk into a constellation or spiral. */
-export async function renderRouteOnly(a: Activity) {
-  return toLayer(routeCanvas(a.polyline!, 600, 0.05));
+export async function renderRouteOnly(a: Activity, paint: Paint = DEFAULT_PAINT) {
+  return toLayer(routeCanvas(a.polyline!, 600, 0.05, paint));
+}
+
+/**
+ * How a generated sticker was made. Kept on the sticker so it can be re-drawn later,
+ * e.g. in a new route color, without losing quality.
+ */
+export type Recipe =
+  | { kind: "stat"; key: StickerKey; a: Activity; units: Units }
+  | { kind: "run"; a: Activity; keys: StickerKey[]; units: Units }
+  | { kind: "routeOnly"; a: Activity }
+  | { kind: "week"; w: Week; units: Units; raceDetails: boolean }
+  | { kind: "finisher"; source: FinisherSource }
+  | { kind: "versus"; a: Activity; role: "then" | "now"; c: Compare; units: Units };
+
+/** Whether the sticker has a route that a color change would affect. */
+export function recipeHasRoute(r: Recipe) {
+  switch (r.kind) {
+    case "stat":
+      return r.key === "route";
+    case "run":
+      return r.keys.includes("route") && !!r.a.polyline;
+    case "week":
+      return r.w.runs.some((x) => x.polyline);
+    case "finisher":
+      return !!r.source.run.polyline;
+    default:
+      return !!r.a.polyline;
+  }
+}
+
+export function renderRecipe(r: Recipe, paint: Paint = DEFAULT_PAINT) {
+  switch (r.kind) {
+    case "stat":
+      return renderStravaSticker(r.key, r.a, r.units, paint);
+    case "run":
+      return renderRunSticker(r.a, new Set(r.keys), r.units, paint);
+    case "routeOnly":
+      return renderRouteOnly(r.a, paint);
+    case "week":
+      return renderWeekSticker(r.w, r.units, r.raceDetails, paint);
+    case "finisher":
+      return renderFinisherCard(r.source.run, r.source, paint);
+    case "versus":
+      return renderVersusSticker(r.a, r.role, r.c, r.units, paint);
+  }
 }

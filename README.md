@@ -55,6 +55,7 @@ Notes:
 - The session is stored in an httpOnly cookie, and access tokens refresh automatically on the server.
 - **Log out** only clears the cookie. It does not call Strava's `/deauthorize`, so other projects sharing the same API app keep working.
 - New Strava apps are limited to a single athlete (the owner) until Strava approves a capacity increase.
+- **Installed app on iPhone:** a home-screen app has cookies separate from Safari's. Logging in from the installed app uses Strava's web login (`/api/strava/login?app=1`) so iOS can return to the app. If iOS finishes the login in Safari anyway, Safari shows a one-time **login code** (AES-GCM sealed with a key derived from the client secret, valid 10 minutes); paste it in the app's Strava sheet (`/api/strava/redeem`). No server storage is needed.
 
 ## Project structure
 

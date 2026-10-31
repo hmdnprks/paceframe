@@ -70,6 +70,10 @@ _Last updated: 2026-10-31_
   - **Constellation:** routes in a Honeycomb (columns picked to fill the Story)
   - **Spiral of runs:** oldest in the center, longer runs bigger, with a dotted spiral path
   - Runs without GPS are skipped; **Select all shown** in the run grid selects every run in the current filter
+- **Route colors:** Solid, **Gradient** (along each route start → finish, or across runs from first to last) or **Multi-color** (one color per run)
+  - Pick from 12 preset swatches and 8 gradient presets, the native color picker, a hex input, or **From photo** (tap the background photo to sample a color)
+  - Apply to the selected sticker or group, or to all routes; new Strava stickers use the current colors; remembered per device
+  - Strava stickers are re-drawn sharply from their recipe; gallery PNGs (e.g. saved from Strava) get their orange pixels recolored, always from the original
 - **Split background:** one photo, **side by side**, or **top & bottom**, with a white divider; each half has its own photo that you pan and pinch separately; export clips each photo to its half at full quality
 - **km / miles** toggle
 

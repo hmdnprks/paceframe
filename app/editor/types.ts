@@ -1,4 +1,5 @@
-import type { FinisherSource } from "./stravaStickers";
+import type { Paint } from "./routeStyle";
+import type { FinisherSource, Recipe } from "./stravaStickers";
 
 export type FormatId = "story" | "post" | "square";
 
@@ -44,6 +45,14 @@ export type Sticker = ImageLayer & {
   weight?: number;
   /** How a generated sticker was made, so it can be edited and re-rendered in place. */
   edit?: FinisherSource;
+  /** How a Strava sticker was drawn, so it can be re-drawn sharply in new route colors. */
+  recipe?: Recipe;
+  /** The route color it currently has. */
+  paint?: Paint;
+  /** Has no route (goal, difference badge): route colors skip it. */
+  noRoute?: boolean;
+  /** Untouched pixels of a gallery sticker; recoloring always starts from these. */
+  original?: { src: string; img: HTMLImageElement; nw: number; nh: number };
 };
 
 export type Background = ImageLayer;
