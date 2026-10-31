@@ -2,7 +2,7 @@ import type { Activity } from "@/app/lib/activity";
 import { loadImage } from "./types";
 
 export type Units = "metric" | "imperial";
-export type StickerKey = "route" | "distance" | "pace" | "time" | "elevation" | "heartrate" | "cadence" | "calories" | "title";
+export type StickerKey = "route" | "distance" | "pace" | "time" | "elevation" | "heartrate" | "cadence" | "calories" | "date" | "title";
 
 // Matches Strava's own route sticker.
 const ROUTE_COLOR = "#FC5200";
@@ -36,6 +36,7 @@ export function statsFor(a: Activity, units: Units): { key: StickerKey; label: s
   if (a.avgHr) out.push({ key: "heartrate", label: "Avg HR", value: `${Math.round(a.avgHr)} bpm` });
   if (a.cadence) out.push({ key: "cadence", label: "Cadence", value: `${a.cadence} ${isRun(a) ? "spm" : "rpm"}` });
   if (a.calories) out.push({ key: "calories", label: "Calories", value: `${Math.round(a.calories)} Cal` });
+  out.push({ key: "date", label: "Date", value: shortDate(a.date) });
   out.push({ key: "title", label: "Title", value: a.name });
   return out;
 }
@@ -43,6 +44,11 @@ export function statsFor(a: Activity, units: Units): { key: StickerKey; label: s
 export function formatDate(iso: string) {
   // start_date_local is local wall time tagged as Z; read it as UTC to avoid shifting.
   return new Date(iso).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+}
+
+/** "Sun, Jun 14" — wall-clock date, read as UTC (see formatDate). */
+export function shortDate(iso: string | Date) {
+  return new Date(iso).toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
 }
 
 /** Google encoded polyline → [lat, lng][] */
@@ -188,18 +194,23 @@ export async function renderRunSticker(a: Activity, keys: Set<StickerKey>, units
   const pad = 30;
   const gap = 40;
   const titleH = title ? 84 * 1.15 + 44 * 1.2 + gap : 0;
+  const raceH = a.race ? 64 + gap * 0.6 : 0;
   const routeH = route ? Math.min(route.height, 900) : 0;
   const routeW = route ? (route.width * routeH) / route.height : 0;
   const statsH = rows * cellH;
 
   const c = document.createElement("canvas");
   c.width = W + pad * 2;
-  c.height = Math.ceil(pad * 2 + titleH + routeH + (route && stats.length ? gap : 0) + statsH);
+  c.height = Math.ceil(pad * 2 + raceH + titleH + routeH + (route && stats.length ? gap : 0) + statsH);
   const ctx = c.getContext("2d")!;
   let y = pad;
 
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
+  if (a.race) {
+    racePill(ctx, c.width / 2, y, family);
+    y += raceH;
+  }
   if (title) {
     shadow(ctx);
     ctx.fillStyle = "#fff";
@@ -234,5 +245,147 @@ export async function renderRunSticker(a: Activity, keys: Set<StickerKey>, units
     ctx.fillText(s.value, cx, top + labelSize * 1.2, cellW * 0.95);
   });
 
+  return toLayer(c);
+}
+
+function racePill(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  top: number,
+  family: string,
+  align: "center" | "left" = "center",
+  height = 64,
+) {
+  ctx.save();
+  ctx.shadowColor = "transparent";
+  ctx.font = `800 ${height * 0.62}px ${family}`;
+  const label = "RACE";
+  const w = ctx.measureText(label).width + height * 0.75;
+  const x = align === "center" ? cx - w / 2 : cx;
+  ctx.fillStyle = ROUTE_COLOR;
+  ctx.beginPath();
+  ctx.roundRect(x, top, w, height, height / 2);
+  ctx.fill();
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, x + w / 2, top + height * 0.52);
+  ctx.restore();
+  return w;
+}
+
+function pillWidth(family: string, height: number) {
+  const m = document.createElement("canvas").getContext("2d")!;
+  m.font = `800 ${height * 0.62}px ${family}`;
+  return m.measureText("RACE").width + height * 0.75;
+}
+
+export type Week = { index: number; start: Date; end: Date; runs: Activity[] };
+
+const DAY = 86_400_000;
+
+/** Split runs into consecutive 7-day weeks starting on `from` (YYYY-MM-DD), through `to`. */
+export function buildWeeks(runs: Activity[], from: string, to: string): Week[] {
+  // Activity dates are local wall time tagged as UTC, so compare everything in UTC.
+  const start = Date.parse(`${from}T00:00:00Z`);
+  const end = Date.parse(`${to}T00:00:00Z`) + DAY;
+  const count = Math.max(1, Math.ceil((end - start) / (7 * DAY)));
+  const weeks: Week[] = Array.from({ length: count }, (_, i) => ({
+    index: i + 1,
+    start: new Date(start + i * 7 * DAY),
+    end: new Date(Math.min(start + (i + 1) * 7 * DAY, end) - DAY),
+    runs: [],
+  }));
+  for (const r of runs) {
+    const i = Math.floor((Date.parse(r.date) - start) / (7 * DAY));
+    if (i >= 0 && i < count) weeks[i].runs.push(r);
+  }
+  // Drop empty weeks after the last run (e.g. a range ending a day after race week).
+  while (weeks.length > 1 && !weeks[weeks.length - 1].runs.length) weeks.pop();
+  return weeks;
+}
+
+const monthDay = (d: Date) => d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
+
+/**
+ * One week of a training block: long-run route on the left, totals on the right. Race week gets a RACE pill;
+ * `raceDetails` adds a short distance · time line (skip it when the race has its own finale sticker).
+ */
+export async function renderWeekSticker(w: Week, units: Units, raceDetails = true) {
+  await document.fonts?.ready;
+  const family = fontFamily();
+  const len = units === "metric" ? 1000 : 1609.344;
+  const unit = units === "metric" ? "km" : "mi";
+  const total = w.runs.reduce((s, r) => s + r.distance, 0);
+  const race = w.runs.find((r) => r.race);
+  const long = [...w.runs].sort((a, b) => b.distance - a.distance)[0];
+  const featured = race ?? long;
+  const route = featured?.polyline ? routeCanvas(featured.polyline, 300) : null;
+
+  const sameMonth = w.start.getUTCMonth() === w.end.getUTCMonth();
+  const range = sameMonth
+    ? `${monthDay(w.start)}–${w.end.getUTCDate()}`
+    : `${monthDay(w.start)} – ${monthDay(w.end)}`;
+  const lines: { text: string; size: number; weight: number; alpha: number; color?: string }[] = [
+    { text: `WEEK ${w.index} · ${range.toUpperCase()}`, size: 38, weight: 600, alpha: 0.85 },
+    { text: w.runs.length ? `${(total / len).toFixed(1)} ${unit}` : "Rest", size: 110, weight: 800, alpha: 1 },
+    {
+      text: w.runs.length
+        ? `${w.runs.length} run${w.runs.length > 1 ? "s" : ""} · long ${(long.distance / len).toFixed(1)} ${unit}`
+        : "Recovery week",
+      size: 40,
+      weight: 500,
+      alpha: 0.85,
+    },
+  ];
+  if (race && raceDetails) {
+    // No race name here: long names make this stop much wider than the others.
+    lines.push({
+      text: `Race · ${(race.distance / len).toFixed(2)} ${unit} · ${duration(race.movingTime)}`,
+      size: 40,
+      weight: 700,
+      alpha: 1,
+      color: ROUTE_COLOR,
+    });
+  }
+
+  const m = document.createElement("canvas").getContext("2d")!;
+  const widths = lines.map((l) => {
+    m.font = `${l.weight} ${l.size}px ${family}`;
+    return m.measureText(l.text).width;
+  });
+  const pad = 30;
+  const gap = 36;
+  // RACE pill sits inline after the week label, so race week stays the same height as other weeks.
+  const pillH = 44;
+  const pillGap = 16;
+  if (race) widths[0] += pillGap + pillWidth(family, pillH);
+  const textH = lines.reduce((s, l) => s + l.size * 1.15, 0);
+  const routeBox = route ? Math.min(300, textH) : 0;
+  const routeW = route ? (route.width / Math.max(route.width, route.height)) * routeBox : 0;
+  const c = document.createElement("canvas");
+  c.width = Math.ceil(pad * 2 + (route ? routeBox + gap : 0) + Math.max(...widths, 300));
+  c.height = Math.ceil(pad * 2 + Math.max(textH, routeBox));
+  const ctx = c.getContext("2d")!;
+
+  if (route) {
+    const rh = (route.height / Math.max(route.width, route.height)) * routeBox;
+    ctx.drawImage(route, pad + (routeBox - routeW) / 2, (c.height - rh) / 2, routeW, rh);
+  }
+  const left = pad + (route ? routeBox + gap : 0);
+  let y = (c.height - textH) / 2;
+  if (race) {
+    m.font = `${lines[0].weight} ${lines[0].size}px ${family}`;
+    racePill(ctx, left + m.measureText(lines[0].text).width + pillGap, y + (lines[0].size - pillH) / 2, family, "left", pillH);
+  }
+  shadow(ctx);
+  ctx.textBaseline = "top";
+  for (const l of lines) {
+    ctx.font = `${l.weight} ${l.size}px ${family}`;
+    ctx.globalAlpha = l.alpha;
+    ctx.fillStyle = l.color ?? "#fff";
+    ctx.fillText(l.text, left, y);
+    y += l.size * 1.15;
+  }
   return toLayer(c);
 }

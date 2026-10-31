@@ -1,9 +1,20 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronLeft, Dices, Minus, Plus, RefreshCw, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Dices, Flag, Milestone, Minus, Plus, RefreshCw, X } from "lucide-react";
 import type { Activity } from "@/app/lib/activity";
-import { decodePolyline, formatDate, renderRunSticker, renderStravaSticker, statsFor, type StickerKey, type Units } from "./stravaStickers";
+import {
+  buildWeeks,
+  decodePolyline,
+  formatDate,
+  renderRunSticker,
+  renderStravaSticker,
+  renderWeekSticker,
+  statsFor,
+  type StickerKey,
+  type Units,
+} from "./stravaStickers";
+import type { LayoutId, LayoutOptions } from "./layouts";
 import type { loadImage } from "./types";
 
 type Layer = Awaited<ReturnType<typeof loadImage>>;
@@ -101,6 +112,7 @@ const STICKER_LABELS: Record<StickerKey, string> = {
   heartrate: "Avg heart rate",
   cadence: "Cadence",
   calories: "Calories",
+  date: "Date",
   title: "Title + date",
 };
 
@@ -111,8 +123,11 @@ export default function StravaPanel({
 }: {
   hasWork: boolean;
   error: string | null;
-  /** `perRow` = stickers per activity, so a grid can put one activity per row. */
-  onAdd: (layers: Layer[], perRow?: number) => void;
+  /**
+   * `perRow` = stickers per activity, so a grid can put one activity per row.
+   * `layout` = apply this layout right away instead of asking.
+   */
+  onAdd: (layers: Layer[], perRow?: number, layout?: LayoutId, layoutOpts?: Partial<LayoutOptions>) => void;
 }) {
   const [athlete, setAthlete] = useState<Athlete | null | undefined>(undefined);
   const [activities, setActivities] = useState<Activity[]>([]);
@@ -144,6 +159,16 @@ export default function StravaPanel({
   const [pool, setPool] = useState<{ key: string; runs: Activity[]; truncated: boolean } | null>(null);
   const [rolling, setRolling] = useState(false);
   const [randomInfo, setRandomInfo] = useState<string | null>(null);
+
+  // Training timeline: a date range as one stop per week (or per run), in order.
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [groupBy, setGroupBy] = useState<"week" | "run">("week");
+  const [building, setBuilding] = useState(false);
+  const [timelineInfo, setTimelineInfo] = useState<string | null>(null);
+  // Race finale: "auto" = latest run marked as Race in Strava, a run id, or null for none.
+  const [heroChoice, setHeroChoice] = useState<number | "auto" | null>("auto");
+  const [heroPicking, setHeroPicking] = useState(false);
+  const [timelineHeroId, setTimelineHeroId] = useState<number | null>(null);
 
   async function loadPage(p: number) {
     setLoading(true);
@@ -178,21 +203,45 @@ export default function StravaPanel({
   const known = (id: number) => activities.find((a) => a.id === id) ?? pool?.runs.find((a) => a.id === id);
   const selected = selectedIds.map(known).filter((a): a is Activity => !!a);
 
-  async function rollRandom() {
+  const rangeLabel = range === "custom" ? `${from} → ${to}` : `last ${RANGES.find((x) => x.id === range)!.label}`;
+
+  /** First/last day (YYYY-MM-DD) of the chosen range. */
+  function rangeDays() {
+    if (range === "custom") return { first: from, last: to };
+    const d = new Date();
+    d.setMonth(d.getMonth() - Number(range));
+    return { first: isoDay(d), last: isoDay(new Date()) };
+  }
+
+  /** All runs in the chosen date range (cached per range). */
+  async function loadPool() {
     const win = rangeWindow(range, from, to);
-    if (!win) return setMessage("Pick a valid date range (start before end).");
+    if (!win) {
+      setMessage("Pick a valid date range (start before end).");
+      return null;
+    }
     const key = `${range}|${range === "custom" ? `${from}|${to}` : ""}`;
+    if (pool?.key === key) return pool;
+    const res = await fetch(`/api/strava/runs?after=${Math.floor(win.after)}&before=${Math.floor(win.before)}`);
+    if (res.status === 401) {
+      setAthlete(null);
+      return null;
+    }
+    if (!res.ok) {
+      setMessage("Couldn't load runs for that range. Try again in a bit.");
+      return null;
+    }
+    const data = (await res.json()) as { runs: Activity[]; truncated: boolean };
+    const next = { key, ...data };
+    setPool(next);
+    return next;
+  }
+
+  async function rollRandom() {
     setRolling(true);
     try {
-      let current = pool?.key === key ? pool : null;
-      if (!current) {
-        const res = await fetch(`/api/strava/runs?after=${Math.floor(win.after)}&before=${Math.floor(win.before)}`);
-        if (res.status === 401) return setAthlete(null);
-        if (!res.ok) return setMessage("Couldn't load runs for that range. Try again in a bit.");
-        const data = (await res.json()) as { runs: Activity[]; truncated: boolean };
-        current = { key, ...data };
-        setPool(current);
-      }
+      const current = await loadPool();
+      if (!current) return;
       const r = FILTERS[units][filter];
       const eligible = current.runs.filter((a) => {
         const d = a.distance / unitLen(units);
@@ -201,7 +250,7 @@ export default function StravaPanel({
       if (!eligible.length) return setMessage("No runs match that date range and distance filter.");
       const picked = shuffle(eligible).slice(0, randomCount);
       setSelectedIds(picked.map((a) => a.id));
-      const rangeLabel = range === "custom" ? `${from} → ${to}` : `last ${RANGES.find((x) => x.id === range)!.label}`;
+      setTimelineInfo(null);
       setRandomInfo(
         `${picked.length} random of ${eligible.length} runs · ${rangeLabel}${r.min > 0 || r.max < Infinity ? ` · ${r.label}` : ""}${current.truncated ? " (first 1000 activities)" : ""}`,
       );
@@ -209,6 +258,70 @@ export default function StravaPanel({
       setStep("stickers");
     } finally {
       setRolling(false);
+    }
+  }
+
+  function resolveHero(runs: Activity[]) {
+    if (heroChoice === null) return null;
+    if (heroChoice === "auto") return [...runs].reverse().find((r) => r.race) ?? null;
+    return runs.find((r) => r.id === heroChoice) ?? null;
+  }
+
+  /** The race as a big sticker: route, chosen metrics, title + date, RACE pill. */
+  async function renderHero(hero: Activity) {
+    const res = await fetch(`/api/strava/activities/${hero.id}`);
+    const detail = res.ok ? ((await res.json()) as { activity: Activity }).activity : hero;
+    const heroKeys = new Set<StickerKey>([...keys, "route", "title"]);
+    heroKeys.delete("date"); // the title already shows the date
+    return renderRunSticker({ ...detail, race: true }, heroKeys, units);
+  }
+
+  async function openHeroPicker() {
+    if (heroPicking) return setHeroPicking(false);
+    setBuilding(true);
+    try {
+      if (await loadPool()) setHeroPicking(true);
+    } finally {
+      setBuilding(false);
+    }
+  }
+
+  async function buildTimeline() {
+    setBuilding(true);
+    try {
+      const current = await loadPool();
+      if (!current) return;
+      const hero = resolveHero(current.runs);
+      // Only the chosen race is treated as the race (the RACE pill follows your pick, not Strava's tag).
+      const runs = [...current.runs]
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .map((r) => ({ ...r, race: hero ? r.id === hero.id : r.race }));
+      if (groupBy === "week") {
+        // Weekly totals use every run, so the distance filter doesn't apply here.
+        const { first, last } = rangeDays();
+        const weeks = buildWeeks(runs, first, last);
+        const layers = await Promise.all(weeks.map((w) => renderWeekSticker(w, units, !hero)));
+        if (hero) layers.push(await renderHero(hero));
+        onAdd(layers, undefined, "timeline", { hero: !!hero });
+        return;
+      }
+      const r = FILTERS[units][filter];
+      const eligible = runs.filter((a) => {
+        const d = a.distance / unitLen(units);
+        return a.id !== hero?.id && d >= r.min && d < r.max;
+      });
+      if (!eligible.length) return setMessage("No runs match that date range and distance filter.");
+      setSelectedIds([...eligible.map((a) => a.id), ...(hero ? [hero.id] : [])]);
+      setTimelineHeroId(hero?.id ?? null);
+      setKeys((k) => new Set([...k, "date"]));
+      setRandomInfo(null);
+      setTimelineInfo(
+        `${eligible.length} runs, oldest first${hero ? ` · finale: ${hero.name}` : ""} · ${rangeLabel}${eligible.length > 30 ? " · tip: Weeks reads better with this many" : ""}`,
+      );
+      setTimelineOpen(false);
+      setStep("stickers");
+    } finally {
+      setBuilding(false);
     }
   }
 
@@ -221,6 +334,8 @@ export default function StravaPanel({
 
   const toggleActivity = (id: number) => {
     setRandomInfo(null);
+    setTimelineInfo(null);
+    setTimelineHeroId(null);
     setSelectedIds((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
   };
 
@@ -235,13 +350,25 @@ export default function StravaPanel({
   async function add() {
     setAdding(true);
     try {
-      // Detail has the full-resolution route and calories.
-      const detailed = await Promise.all(
-        selected.map(async (a) => {
-          const res = await fetch(`/api/strava/activities/${a.id}`);
-          return res.ok ? ((await res.json()) as { activity: Activity }).activity : a;
-        }),
-      );
+      // Detail has the full-resolution route and calories. Skip it for big batches
+      // so we stay well inside Strava's rate limits (summary routes are fine at sticker size).
+      const detailed =
+        selected.length > 10
+          ? selected
+          : await Promise.all(
+              selected.map(async (a) => {
+                const res = await fetch(`/api/strava/activities/${a.id}`);
+                return res.ok ? ((await res.json()) as { activity: Activity }).activity : a;
+              }),
+            );
+      if (timelineInfo) {
+        const hero = detailed.find((a) => a.id === timelineHeroId);
+        const ordered = detailed.filter((a) => a !== hero).sort((a, b) => a.date.localeCompare(b.date));
+        const layers = await Promise.all(ordered.map((a) => renderRunSticker({ ...a, race: false }, keys, units)));
+        if (hero) layers.push(await renderHero(hero));
+        onAdd(layers, undefined, "timeline", { hero: !!hero });
+        return;
+      }
       if (mode === "combined") {
         onAdd(await Promise.all(detailed.map((a) => renderRunSticker(a, keys, units))));
         return;
@@ -271,6 +398,49 @@ export default function StravaPanel({
         <X size={16} />
       </button>
     </div>
+  );
+
+  const rangePicker = (
+    <>
+          <div className="mb-1 text-xs text-white/50">From</div>
+          <div className="mb-3 flex flex-wrap gap-2">
+            {RANGES.map((r) => (
+              <button
+                key={r.id}
+                onClick={() => setRange(r.id)}
+                className={`h-8 rounded-full px-3.5 text-xs font-semibold ${range === r.id ? "bg-[#fc4c02] text-white" : "bg-white/10 text-white/70"}`}
+              >
+                {r.id === "custom" ? r.label : `Last ${r.label}`}
+              </button>
+            ))}
+          </div>
+
+          {range === "custom" && (
+            <div className="mb-3 grid grid-cols-2 gap-2">
+              <label className="text-xs text-white/50">
+                Start
+                <input
+                  type="date"
+                  value={from}
+                  max={to}
+                  onChange={(e) => setFrom(e.target.value)}
+                  className="mt-1 h-11 w-full rounded-xl bg-white/10 px-3 text-sm text-white [color-scheme:dark]"
+                />
+              </label>
+              <label className="text-xs text-white/50">
+                End
+                <input
+                  type="date"
+                  value={to}
+                  min={from}
+                  max={isoDay(new Date())}
+                  onChange={(e) => setTo(e.target.value)}
+                  className="mt-1 h-11 w-full rounded-xl bg-white/10 px-3 text-sm text-white [color-scheme:dark]"
+                />
+              </label>
+            </div>
+          )}
+    </>
   );
 
   const unitToggle = (
@@ -312,7 +482,7 @@ export default function StravaPanel({
 
   if (step === "stickers") {
     const total =
-      mode === "combined"
+      mode === "combined" || timelineInfo
         ? selected.length
         : selected.reduce((n, a) => n + statsFor(a, units).filter((s) => keys.has(s.key)).length, 0);
     return (
@@ -324,13 +494,18 @@ export default function StravaPanel({
           </button>
           {unitToggle}
         </div>
-        {randomInfo && (
+        {(randomInfo || timelineInfo) && (
           <div className="mb-4 rounded-xl bg-white/5 p-3">
             <div className="mb-2 flex items-center justify-between gap-2">
               <span className="flex items-start gap-1.5 text-xs text-white/60">
-                <Dices size={14} className="mt-px shrink-0 text-[#fc4c02]" />
-                {randomInfo}
+                {randomInfo ? (
+                  <Dices size={14} className="mt-px shrink-0 text-[#fc4c02]" />
+                ) : (
+                  <Milestone size={14} className="mt-px shrink-0 text-[#fc4c02]" />
+                )}
+                {randomInfo ?? timelineInfo}
               </span>
+              {randomInfo && (
               <button
                 onClick={rollRandom}
                 disabled={rolling}
@@ -339,6 +514,7 @@ export default function StravaPanel({
                 <RefreshCw size={13} className={rolling ? "animate-spin" : ""} />
                 Re-roll
               </button>
+              )}
             </div>
             <div className="-mx-1 flex gap-2 overflow-x-auto px-1 [scrollbar-width:none]">
               {selected.map((a) => (
@@ -359,6 +535,7 @@ export default function StravaPanel({
           Same for {selected.length === 1 ? <b className="text-white/80">{selected[0].name}</b> : `all ${selected.length} runs`} · remembered for next time
         </p>
 
+        {!timelineInfo && (
         <div className="mb-3 flex rounded-xl bg-white/5 p-1 text-sm">
           {(
             [
@@ -376,6 +553,7 @@ export default function StravaPanel({
             </button>
           ))}
         </div>
+        )}
 
         <div className="flex flex-col gap-1.5">
           {kinds.map(({ key, count }) => {
@@ -454,13 +632,146 @@ export default function StravaPanel({
         ))}
       </div>
 
-      <button
-        onClick={() => setRandomOpen((o) => !o)}
-        className={`mb-3 flex h-11 w-full items-center justify-center gap-2 rounded-xl text-sm font-semibold ${randomOpen ? "bg-white text-black" : "bg-white/10"}`}
-      >
-        <Dices size={18} />
-        Pick random runs
-      </button>
+      <div className="mb-3 grid grid-cols-2 gap-2">
+        <button
+          onClick={() => (setRandomOpen((o) => !o), setTimelineOpen(false))}
+          className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold ${randomOpen ? "bg-white text-black" : "bg-white/10"}`}
+        >
+          <Dices size={18} />
+          Random runs
+        </button>
+        <button
+          onClick={() => (setTimelineOpen((o) => !o), setRandomOpen(false))}
+          className={`flex h-11 items-center justify-center gap-2 rounded-xl text-sm font-semibold ${timelineOpen ? "bg-white text-black" : "bg-white/10"}`}
+        >
+          <Milestone size={18} />
+          Training timeline
+        </button>
+      </div>
+
+      {timelineOpen && (
+        <div className="mb-4 rounded-2xl bg-white/5 p-3">
+          <p className="mb-3 text-xs text-white/60">
+            Lay out a training block in order, e.g. 19 weeks from your first session to race day. Pick <b>Custom</b> for exact dates.
+          </p>
+          {rangePicker}
+          <div className="mb-1 text-xs text-white/50">Race finale</div>
+          {(() => {
+            const chosen = pool && heroChoice !== null ? resolveHero(pool.runs) : null;
+            const label =
+              heroChoice === null
+                ? "No finale"
+                : chosen
+                  ? chosen.name
+                  : heroChoice === "auto"
+                    ? "Auto: your run marked as Race in Strava"
+                    : "Pick a run in this range";
+            return (
+              <button
+                onClick={openHeroPicker}
+                disabled={building}
+                className="mb-2 flex w-full items-center gap-3 rounded-xl bg-black/20 p-2.5 text-left disabled:opacity-50"
+              >
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-[#101012] text-[#fc4c02]">
+                  {chosen?.polyline ? <RouteThumb polyline={chosen.polyline} /> : <Flag size={18} />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-semibold">{label}</div>
+                  <div className="truncate text-[11px] text-white/45">
+                    {chosen
+                      ? `${formatDate(chosen.date)} · ${(chosen.distance / unitLen(units)).toFixed(2)} ${units === "metric" ? "km" : "mi"}`
+                      : "Shown big at the end of the timeline"}
+                  </div>
+                </div>
+                <ChevronRight size={18} className={`shrink-0 text-white/40 transition ${heroPicking ? "rotate-90" : ""}`} />
+              </button>
+            );
+          })()}
+          {heroPicking && pool && (
+            <div className="mb-3 rounded-xl bg-black/20 p-2">
+              <div className="mb-2 flex gap-2">
+                {(
+                  [
+                    ["auto", "Auto"],
+                    [null, "None"],
+                  ] as const
+                ).map(([v, label]) => (
+                  <button
+                    key={label}
+                    onClick={() => (setHeroChoice(v), setHeroPicking(false))}
+                    className={`h-8 rounded-full px-3.5 text-xs font-semibold ${heroChoice === v ? "bg-[#fc4c02] text-white" : "bg-white/10 text-white/70"}`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex max-h-64 flex-col gap-1 overflow-y-auto">
+                {[...pool.runs]
+                  // Likely races first: Strava-marked races, then the longest runs.
+                  .sort((a, b) => Number(!!b.race) - Number(!!a.race) || b.distance - a.distance)
+                  .slice(0, 15)
+                  .map((a) => {
+                    const on = heroChoice === a.id;
+                    return (
+                      <button
+                        key={a.id}
+                        onClick={() => (setHeroChoice(a.id), setHeroPicking(false))}
+                        className={`flex items-center gap-2.5 rounded-lg p-1.5 text-left ${on ? "bg-white/10" : ""}`}
+                      >
+                        <div className="h-9 w-9 shrink-0 overflow-hidden rounded-md bg-[#101012]">
+                          {a.polyline && <RouteThumb polyline={a.polyline} />}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5 truncate text-sm font-medium">
+                            {a.race && <Flag size={12} className="shrink-0 text-[#fc4c02]" />}
+                            <span className="truncate">{a.name}</span>
+                          </div>
+                          <div className="text-[11px] text-white/45">{formatDate(a.date)}</div>
+                        </div>
+                        <div className="shrink-0 text-sm font-semibold tabular-nums">
+                          {(a.distance / unitLen(units)).toFixed(2)}
+                          <span className="ml-0.5 text-[10px] text-white/50">{units === "metric" ? "km" : "mi"}</span>
+                        </div>
+                        {on && <Check size={16} className="shrink-0 text-[#fc4c02]" />}
+                      </button>
+                    );
+                  })}
+              </div>
+            </div>
+          )}
+
+          <div className="mb-1 text-xs text-white/50">One stop per</div>
+          <div className="mb-2 flex rounded-xl bg-black/20 p-1 text-sm">
+            {(
+              [
+                ["week", "Week", "Total km, runs, long run"],
+                ["run", "Run", "Your chosen metrics"],
+              ] as const
+            ).map(([g, label, hint]) => (
+              <button
+                key={g}
+                onClick={() => setGroupBy(g)}
+                className={`flex-1 rounded-lg px-2 py-2 text-center ${groupBy === g ? "bg-white text-black" : "text-white/60"}`}
+              >
+                <div className="font-semibold">{label}</div>
+                <div className={`text-[10px] ${groupBy === g ? "text-black/60" : "text-white/40"}`}>{hint}</div>
+              </button>
+            ))}
+          </div>
+          <p className="mb-3 text-[11px] text-white/40">
+            {groupBy === "week"
+              ? "Weeks start on your start date. The race week gets a RACE badge; empty weeks show as rest."
+              : `Distance filter applies: ${FILTERS[units][filter].label}`}
+          </p>
+          <button
+            onClick={buildTimeline}
+            disabled={building}
+            className="h-12 w-full rounded-full bg-[#fc4c02] font-semibold active:brightness-90 disabled:opacity-40"
+          >
+            {building ? "Building timeline…" : groupBy === "week" ? "Build weekly timeline" : "Choose metrics"}
+          </button>
+        </div>
+      )}
 
       {randomOpen && (
         <div className="mb-4 rounded-2xl bg-white/5 p-3">
@@ -497,44 +808,7 @@ export default function StravaPanel({
             </button>
           </div>
 
-          <div className="mb-1 text-xs text-white/50">From</div>
-          <div className="mb-3 flex flex-wrap gap-2">
-            {RANGES.map((r) => (
-              <button
-                key={r.id}
-                onClick={() => setRange(r.id)}
-                className={`h-8 rounded-full px-3.5 text-xs font-semibold ${range === r.id ? "bg-[#fc4c02] text-white" : "bg-white/10 text-white/70"}`}
-              >
-                {r.id === "custom" ? r.label : `Last ${r.label}`}
-              </button>
-            ))}
-          </div>
-
-          {range === "custom" && (
-            <div className="mb-3 grid grid-cols-2 gap-2">
-              <label className="text-xs text-white/50">
-                Start
-                <input
-                  type="date"
-                  value={from}
-                  max={to}
-                  onChange={(e) => setFrom(e.target.value)}
-                  className="mt-1 h-11 w-full rounded-xl bg-white/10 px-3 text-sm text-white [color-scheme:dark]"
-                />
-              </label>
-              <label className="text-xs text-white/50">
-                End
-                <input
-                  type="date"
-                  value={to}
-                  min={from}
-                  max={isoDay(new Date())}
-                  onChange={(e) => setTo(e.target.value)}
-                  className="mt-1 h-11 w-full rounded-xl bg-white/10 px-3 text-sm text-white [color-scheme:dark]"
-                />
-              </label>
-            </div>
-          )}
+          {rangePicker}
 
           <p className="mb-3 text-[11px] text-white/40">Distance filter applies: {FILTERS[units][filter].label}</p>
           <button
@@ -606,7 +880,7 @@ export default function StravaPanel({
 
       {selectedIds.length > 0 && (
         <div className="sticky bottom-0 -mx-4 mt-3 flex items-center gap-2 bg-[#18181b] px-4 pt-2">
-          <button onClick={() => (setSelectedIds([]), setRandomInfo(null))} className="h-12 rounded-full bg-white/10 px-4 text-sm font-medium">
+          <button onClick={() => (setSelectedIds([]), setRandomInfo(null), setTimelineInfo(null))} className="h-12 rounded-full bg-white/10 px-4 text-sm font-medium">
             Clear
           </button>
           <button

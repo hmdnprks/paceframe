@@ -19,10 +19,15 @@ _Last updated: 2026-10-31_
 - **Mobile-first UI:** bottom sheets, large touch targets, iOS safe areas, no accidental page zoom
 
 ### Layouts & groups
-- **Presets:** Stack, Corner (Strava style), Grid, Arc, Bottom bar, Circle, Hero, Scatter
+- **Presets:** Stack, Corner (Strava style), Grid, Arc, Timeline, Bottom bar, Circle, Hero, Scatter
 - **Grid:** 1–8 columns, updates live
 - **Arc:** stickers per arc, bend slider from ∪ to ∩ (±240°), tilt along the curve, inner arcs for overflow
+- **Timeline:** stickers in order along a line with node dots, vertical or horizontal, optional zigzag (auto-on for more than 8 stops); the line is a generated sticker that moves and exports with the group
 - **Scatter:** random tilt with **no overlaps**, auto-shrinks to fit
+- **Shape from image:** upload a logo or silhouette (e.g. a hand sign) and stickers take its shape
+  - The shape is detected on-device, from transparency or by separating it from a plain background; **Invert** swaps shape and background
+  - **Fill** spreads stickers evenly inside the shape (thin parts like fingers included), **Outline** places them along its edge, with no overlaps
+  - Optional faint **silhouette** behind the stickers
 - All layouts stay inside **Instagram's safe area**
 - **Groups:** a layout groups its stickers. Drag, pinch, rotate or recenter the whole group; ungroup to edit one sticker; "Group all" to regroup
 - Re-layout (e.g. changing columns) keeps the group where you placed it
@@ -44,6 +49,12 @@ _Last updated: 2026-10-31_
 - **Sticker modes:**
   - **One sticker per run:** Strava-style route (`#FC5200`, transparent) with a metrics grid underneath
   - **Separate stickers:** one per metric; Grid suggests one row per run
+- **Training timeline:** pick a date range (e.g. a 19-week block from Jun 14 to race week)
+  - **One stop per week:** week number and dates, total distance, run count, long run, and the long run's route. Race week (Strava "Race" workout type) gets an orange RACE pill plus race name, distance and time. Empty weeks show as "Rest"; empty trailing weeks are dropped
+  - **One stop per run:** all runs in range, oldest first, with your chosen metrics (adds a **Date** metric)
+  - **Race finale:** choose the hero run (auto-picks the run marked as Race in Strava; the longest runs are suggested first). It's shown big at the end of the line with route, metrics, title and a RACE pill, and the RACE badge follows your pick
+- **Race badge** on per-run stickers for activities marked as Race
+- Big batches (more than 10 runs) skip per-activity detail requests to stay within Strava rate limits
 - **km / miles** toggle
 
 ### Platform
@@ -84,8 +95,30 @@ _Last updated: 2026-10-31_
 - **Alignment tools:** align left/center/right and distribute evenly for a multi-selection
 - **Multi-select stickers** (long-press) without grouping everything
 - **Lock sticker** so it can't be moved by accident
-- **Custom shapes:** heart, number shape (e.g. "10" for a 10K), letter paths
 - **Route mosaic:** fit many routes into a tight puzzle-like collage
+- **Shape from image extras:** draw a shape with your finger, text-to-shape (type "42K" or a name), a mix of fill and outline, a tolerance slider for busy photos, and AI subject cut-out to take the shape from a real photo (e.g. yourself mid-stride)
+- **Keep-clear box:** drag a box over the photo (face, medal, finish banner) and every layout avoids it
+
+### More layout shapes
+_Running-specific_
+- **Number:** stickers fill the outline of a distance, e.g. "5", "10", "21", "42"
+- **Calendar:** a Mon–Sun grid with each run on its day and rest days left blank (weekly or monthly recaps)
+- **Podium / staircase:** stickers step up by distance or pace, a "getting faster" story
+- **Track oval:** stickers around a 400m-track loop, for interval and track sessions
+- **Timeline extras:** spacing proportional to real dates, phase labels (Base, Build, Peak, Taper), a weekly-km bar beside each stop
+
+_Expressive_
+- **Heart:** stickers along a heart outline
+- **Spiral:** outward from the center, growing in size; handles 20–50 stickers better than Scatter
+- **Wave:** a sine-wave row with adjustable height and wave count
+- **Diagonal / zigzag:** a slanted line across the frame for a "speed" feel
+- **Honeycomb:** offset rows, tighter than a grid, for dense route collages
+
+_Practical_
+- **Frame / border:** stickers around the edges, keeping the middle (you) clear
+- **Split:** top and bottom bands only, for selfies and portraits
+- **Masonry:** uneven-height columns for mixed route and metric stickers
+- **Sorted grid:** order by date, distance or pace instead of tap order
 
 ### Photo
 - **Basic adjustments:** brightness, contrast, warmth, blur, darken overlay for text legibility

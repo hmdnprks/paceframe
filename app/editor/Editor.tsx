@@ -4,7 +4,11 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { applyLayout, cascade, DEFAULT_BEND, defaultCols, LAYOUTS, MAX_COLS, TUNABLE, type LayoutId, type LayoutOptions } from "./layouts";
 import { maxMultiplier, renderImage } from "./export";
 import StravaPanel from "./StravaPanel";
+import { shapeSilhouette, timelineLine } from "./decorations";
+import { extractMask } from "./shape";
 import {
+  ArrowDown,
+  ArrowRight,
   BringToFront,
   Check,
   ChevronDown,
@@ -23,6 +27,7 @@ import {
   Move,
   Plus,
   RotateCcw,
+  Shapes,
   SendToBack,
   SlidersHorizontal,
   Trash2,
@@ -146,11 +151,24 @@ export default function Editor() {
   // Suggested grid columns for the last batch (e.g. one row per Strava activity).
   const [hintCols, setHintCols] = useState<number | null>(null);
 
-  function addLayers(loaded: Awaited<ReturnType<typeof loadImage>>[], perRow?: number) {
+  function addLayers(
+    loaded: Awaited<ReturnType<typeof loadImage>>[],
+    perRow?: number,
+    autoLayout?: LayoutId,
+    layoutPatch: Partial<LayoutOptions> = {},
+  ) {
     setHintCols(perRow ?? null);
     setSheet(null);
     const placed = cascade(loaded, format.w, format.h, stickers.length);
     const added: Sticker[] = loaded.map((l, i) => ({ id: uid(), ...l, ...placed[i], opacity: 1 }));
+    if (autoLayout) {
+      const all = [...stickers, ...added];
+      // Long timelines (e.g. a 19-week block) need both sides of the line to stay readable.
+      const o =
+        autoLayout === "timeline" ? { ...opts, zigzag: all.length > 8, horizontal: false, hero: false, ...layoutPatch } : { ...opts, ...layoutPatch };
+      setOpts(o);
+      return arrange(autoLayout, o, false, all);
+    }
     setStickers((s) => [...s, ...added]);
     setSelected(added.length === 1 ? added[0].id : null);
     // Ask how to arrange when several come in at once.
@@ -168,32 +186,106 @@ export default function Editor() {
 
   // Last applied layout and its tunable options (columns, arc bend, tilt).
   const [layout, setLayout] = useState<LayoutId>("grid");
-  const [opts, setOpts] = useState<Required<Omit<LayoutOptions, "rand">>>({ cols: 2, bend: DEFAULT_BEND, tilt: true });
+  const [opts, setOpts] = useState<Required<Omit<LayoutOptions, "rand">>>({
+    cols: 2,
+    bend: DEFAULT_BEND,
+    tilt: true,
+    zigzag: false,
+    horizontal: false,
+    hero: false,
+    mask: null,
+    shapeMode: "fill",
+    silhouette: false,
+  });
   // Stickers that move together. Picking a layout groups everything it arranged.
   const [groupIds, setGroupIds] = useState<string[]>([]);
   const groupMembers = stickers.filter((s) => groupIds.includes(s.id));
   const grouped = groupMembers.length > 1;
   live.current = { bg, stickers, format, k, groupIds };
 
-  function arrange(id: LayoutId, o = opts, keepCenter = false) {
-    const t = applyLayout(id, stickers, format.w, format.h, o);
-    let next = stickers.map((st, i) => ({ ...st, ...t[i] }));
-    if (keepCenter && grouped) {
+  // Ignores stale async decorations when the layout changes quickly (e.g. tapping through options).
+  const decoRun = useRef(0);
+
+  function arrange(id: LayoutId, o = opts, keepCenter = false, base = stickers) {
+    // Layout decorations (timeline line) are rebuilt for every arrangement.
+    base.filter((s) => s.deco).forEach((s) => URL.revokeObjectURL(s.src));
+    const items = base.filter((s) => !s.deco);
+    const t = applyLayout(id, items, format.w, format.h, o);
+    let next = items.map((st, i) => ({ ...st, ...t[i] }));
+    let dx = 0;
+    let dy = 0;
+    const members = groupMembers.filter((s) => !s.deco);
+    if (keepCenter && members.length > 1) {
       // Re-layout in place instead of snapping back to the middle.
-      const was = bounds(groupMembers);
+      const was = bounds(members);
       const now = bounds(next);
-      next = next.map((st) => ({ ...st, x: st.x + was.cx - now.cx, y: st.y + was.cy - now.cy }));
+      dx = was.cx - now.cx;
+      dy = was.cy - now.cy;
+      next = next.map((st) => ({ ...st, x: st.x + dx, y: st.y + dy }));
     }
     setStickers(next);
     setGroupIds(next.map((st) => st.id));
     setSelected(GROUP);
     setLayout(id);
     setSheet(TUNABLE.includes(id) ? "tune" : null);
+
+    const run = ++decoRun.current;
+    const deco =
+      id === "timeline" && next.length > 1
+        ? timelineLine(next.length, format, o, dx, dy)
+        : id === "shape" && o.mask && o.silhouette
+          ? shapeSilhouette(o.mask, format, dx, dy)
+          : null;
+    deco?.then((d) => {
+      if (run !== decoRun.current) return URL.revokeObjectURL(d.src);
+      setStickers((s) => [d, ...s.filter((x) => !x.deco)]);
+      setGroupIds((ids) => [...ids, d.id]);
+    });
+  }
+
+  // ---- Shape from image ----
+  const shapeInput = useRef<HTMLInputElement>(null);
+  const [shapeImg, setShapeImg] = useState<HTMLImageElement | null>(null);
+  const [invertShape, setInvertShape] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 3500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  function applyShape(img: HTMLImageElement, invert: boolean, patch: Partial<typeof opts> = {}) {
+    const mask = extractMask(img, invert);
+    if (!mask) {
+      setToast("Couldn't find a clear shape. Try a logo or silhouette on a plain background, or tap Invert.");
+      return false;
+    }
+    const o = { ...opts, ...patch, mask };
+    setOpts(o);
+    arrange("shape", o, layout === "shape");
+    return true;
+  }
+
+  async function onShapeFile(files: FileList | null) {
+    const file = files?.[0];
+    if (!file) return;
+    const { img, src } = await loadImage(file);
+    // The mask is all we need; the image only stays around for Invert.
+    URL.revokeObjectURL(src);
+    if (applyShape(img, false, { shapeMode: "fill" })) {
+      setShapeImg(img);
+      setInvertShape(false);
+    }
+  }
+
+  function toggleInvert() {
+    if (!shapeImg) return;
+    if (applyShape(shapeImg, !invertShape)) setInvertShape(!invertShape);
   }
 
   function pickLayout(id: LayoutId) {
-    if (!TUNABLE.includes(id)) return arrange(id);
-    const n = stickers.length;
+    if (!TUNABLE.includes(id) || id === "timeline") return arrange(id);
+    const n = stickers.filter((s) => !s.deco).length;
     const o = { ...opts, cols: Math.min(hintCols ?? (id === "arc" ? 5 : defaultCols(n)), n, MAX_COLS) };
     setOpts(o);
     arrange(id, o);
@@ -591,7 +683,7 @@ export default function Editor() {
             {guides.v && <div className="pointer-events-none absolute inset-y-0 left-1/2 w-px bg-[#fc4c02]" />}
             {guides.h && <div className="pointer-events-none absolute inset-x-0 top-1/2 h-px bg-[#fc4c02]" />}
 
-            {!bg && (
+            {!bg && stickers.length === 0 && (
               <button
                 onClick={() => photoInput.current?.click()}
                 className="absolute inset-0 m-auto flex h-fit w-fit flex-col items-center gap-3 rounded-2xl p-6 text-white/70 active:text-white"
@@ -663,6 +755,13 @@ export default function Editor() {
         </p>
       </nav>
 
+      <input
+        ref={shapeInput}
+        type="file"
+        accept="image/*"
+        className="sr-only"
+        onChange={(e) => (onShapeFile(e.target.files), (e.target.value = ""))}
+      />
       <input ref={photoInput} type="file" accept="image/*" className="sr-only" onChange={(e) => (onPhoto(e.target.files), (e.target.value = ""))} />
       <input
         ref={stickerInput}
@@ -672,6 +771,12 @@ export default function Editor() {
         className="sr-only"
         onChange={(e) => (onStickers(e.target.files), (e.target.value = ""))}
       />
+
+      {toast && (
+        <div className="fixed inset-x-4 top-[max(env(safe-area-inset-top),12px)] z-[60] rounded-2xl bg-white px-4 py-3 text-sm font-medium text-black shadow-xl">
+          {toast}
+        </div>
+      )}
 
       {/* Sheets */}
       {sheet === "format" && (
@@ -710,6 +815,18 @@ export default function Editor() {
               <div className="text-xs text-white/50">Move each sticker yourself</div>
             </div>
           </button>
+          <button
+            onClick={() => shapeInput.current?.click()}
+            className="mb-3 flex w-full items-center gap-3 rounded-2xl bg-white/5 p-4 text-left active:bg-white/10"
+          >
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#fc4c02]/20 text-[#fc4c02]">
+              <Shapes size={20} />
+            </div>
+            <div>
+              <div className="font-semibold">Shape from image</div>
+              <div className="text-xs text-white/50">Upload a logo or silhouette, and stickers take its shape</div>
+            </div>
+          </button>
           <div className="grid grid-cols-3 gap-2.5">
             {LAYOUTS.map((l) => (
               <button
@@ -730,11 +847,72 @@ export default function Editor() {
       {sheet === "tune" && (
         <div className="fixed inset-x-0 bottom-0 z-50 rounded-t-3xl bg-[#18181b] px-4 pt-4 pb-[max(env(safe-area-inset-bottom),16px)] shadow-[0_-8px_30px_rgba(0,0,0,.5)]">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="font-semibold">{layout === "arc" ? "Arc" : "Grid"}</h2>
+            <h2 className="font-semibold">{LAYOUTS.find((l) => l.id === layout)?.label ?? "Shape"}</h2>
             <button onClick={() => setSheet(null)} className="h-9 rounded-full bg-[#fc4c02] px-5 text-sm font-semibold">
               Done
             </button>
           </div>
+          {layout === "shape" ? (
+            <div className="flex flex-col gap-3">
+              <div className="flex rounded-xl bg-white/5 p-1 text-sm">
+                {(
+                  [
+                    ["fill", "Fill", "Inside the shape"],
+                    ["outline", "Outline", "Along its edge"],
+                  ] as const
+                ).map(([m, label, hint]) => (
+                  <button
+                    key={m}
+                    onClick={() => tune({ shapeMode: m })}
+                    className={`flex-1 rounded-lg px-2 py-1.5 text-center ${opts.shapeMode === m ? "bg-white text-black" : "text-white/60"}`}
+                  >
+                    <div className="font-semibold">{label}</div>
+                    <div className={`text-[10px] ${opts.shapeMode === m ? "text-black/60" : "text-white/40"}`}>{hint}</div>
+                  </button>
+                ))}
+              </div>
+              <Toggle label="Show silhouette behind stickers" on={opts.silhouette} onClick={() => tune({ silhouette: !opts.silhouette })} />
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={toggleInvert} disabled={!shapeImg} className="h-11 rounded-xl bg-white/5 text-sm font-medium disabled:opacity-30">
+                  {invertShape ? "Shape: inverted" : "Invert shape"}
+                </button>
+                <button onClick={() => shapeInput.current?.click()} className="h-11 rounded-xl bg-white/5 text-sm font-medium">
+                  Change image
+                </button>
+              </div>
+            </div>
+          ) : layout === "timeline" ? (
+            <div className="flex flex-col gap-3">
+              <div className="flex rounded-xl bg-white/5 p-1 text-sm">
+                {(
+                  [
+                    [false, "Vertical", ArrowDown],
+                    [true, "Horizontal", ArrowRight],
+                  ] as const
+                ).map(([h, label, Glyph]) => (
+                  <button
+                    key={label}
+                    onClick={() => tune({ horizontal: h })}
+                    className={`flex h-10 flex-1 items-center justify-center gap-1.5 rounded-lg font-semibold ${opts.horizontal === h ? "bg-white text-black" : "text-white/60"}`}
+                  >
+                    <Glyph size={16} />
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <button
+                onClick={() => tune({ zigzag: !opts.zigzag })}
+                className="flex h-11 w-full items-center justify-between rounded-xl bg-white/5 px-4 text-sm"
+              >
+                <span>Zigzag (alternate sides, bigger stickers)</span>
+                <span className={`relative h-6 w-10 rounded-full transition-colors ${opts.zigzag ? "bg-[#fc4c02]" : "bg-white/20"}`}>
+                  <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${opts.zigzag ? "left-[18px]" : "left-0.5"}`} />
+                </span>
+              </button>
+              <Toggle label="Race finale (last sticker big, at the end)" on={opts.hero} onClick={() => tune({ hero: !opts.hero })} />
+            </div>
+          ) : (
+          <>
           <div className="mb-1 text-xs text-white/50">{layout === "arc" ? "Stickers per arc" : "Columns"}</div>
           <div className="flex items-center gap-3">
             <button
@@ -765,6 +943,8 @@ export default function Editor() {
               <Plus size={18} />
             </button>
           </div>
+          </>
+          )}
 
           {layout === "arc" && (
             <>
@@ -812,8 +992,12 @@ export default function Editor() {
           )}
 
           <p className="mt-2 text-center text-[11px] text-white/40">
-            {stickers.length} stickers · {Math.ceil(stickers.length / opts.cols)} {layout === "arc" ? "arc" : "row"}
-            {Math.ceil(stickers.length / opts.cols) > 1 ? "s" : ""} · drag the group to move it
+            {layout === "shape"
+              ? `${stickers.filter((s) => !s.deco).length} stickers in your shape`
+              : layout === "timeline"
+              ? `${stickers.filter((s) => !s.deco).length} stops in sticker order`
+              : `${stickers.length} stickers · ${Math.ceil(stickers.length / opts.cols)} ${layout === "arc" ? "arc" : "row"}${Math.ceil(stickers.length / opts.cols) > 1 ? "s" : ""}`}{" "}
+            · drag the group to move it
           </p>
         </div>
       )}
@@ -894,6 +1078,17 @@ function Tool({
         <Glyph size={20} strokeWidth={2} />
       </span>
       {label}
+    </button>
+  );
+}
+
+function Toggle({ label, on, onClick }: { label: string; on: boolean; onClick: () => void }) {
+  return (
+    <button onClick={onClick} className="flex h-11 w-full items-center justify-between rounded-xl bg-white/5 px-4 text-sm">
+      <span>{label}</span>
+      <span className={`relative h-6 w-10 shrink-0 rounded-full transition-colors ${on ? "bg-[#fc4c02]" : "bg-white/20"}`}>
+        <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${on ? "left-[18px]" : "left-0.5"}`} />
+      </span>
     </button>
   );
 }

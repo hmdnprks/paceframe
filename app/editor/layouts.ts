@@ -1,15 +1,17 @@
+import { placeInShape, type ShapeMask, type ShapeMode } from "./shape";
 import type { Transform } from "./types";
 
 type Box = { nw: number; nh: number };
 type Rect = { x: number; y: number; w: number; h: number };
 
-export type LayoutId = "stack" | "corner" | "grid" | "arc" | "row" | "circle" | "hero" | "scatter";
+export type LayoutId = "stack" | "corner" | "grid" | "arc" | "timeline" | "row" | "circle" | "hero" | "scatter" | "shape";
 
 export const LAYOUTS: { id: LayoutId; label: string; hint: string }[] = [
   { id: "stack", label: "Stack", hint: "Centered column" },
   { id: "corner", label: "Corner", hint: "Bottom-left, Strava style" },
   { id: "grid", label: "Grid", hint: "Pick columns" },
   { id: "arc", label: "Arc", hint: "Curved rows, adjustable" },
+  { id: "timeline", label: "Timeline", hint: "In order along a line" },
   { id: "row", label: "Bottom bar", hint: "Row along the bottom" },
   { id: "circle", label: "Circle", hint: "Ring around center" },
   { id: "hero", label: "Hero", hint: "First big, rest below" },
@@ -19,7 +21,7 @@ export const LAYOUTS: { id: LayoutId; label: string; hint: string }[] = [
 const fit = (b: Box, maxW: number, maxH: number) => Math.min(maxW / b.nw, maxH / b.nh, 4);
 
 /** Area kept clear of Instagram's top bar and reply box. */
-function safeArea(W: number, H: number): Rect {
+export function safeArea(W: number, H: number): Rect {
   const story = H / W > 1.5;
   const top = story ? H * 0.13 : H * 0.06;
   const bottom = story ? H * 0.82 : H * 0.94;
@@ -72,11 +74,22 @@ export type LayoutOptions = {
   bend?: number;
   /** Rotate stickers to follow the arc. */
   tilt?: boolean;
+  /** Timeline: alternate sides of the line. */
+  zigzag?: boolean;
+  /** Timeline: run left→right instead of top→bottom. */
+  horizontal?: boolean;
+  /** Timeline: the last sticker is a big finale (e.g. the race). */
+  hero?: boolean;
+  /** Shape: silhouette from an uploaded image. */
+  mask?: ShapeMask | null;
+  shapeMode?: ShapeMode;
+  /** Shape: draw the silhouette faintly behind the stickers. */
+  silhouette?: boolean;
   rand?: () => number;
 };
 
 /** Layouts that open the tuning panel (columns, bend…) after being applied. */
-export const TUNABLE: LayoutId[] = ["grid", "arc"];
+export const TUNABLE: LayoutId[] = ["grid", "arc", "timeline", "shape"];
 export const DEFAULT_BEND = 100;
 
 export const MAX_COLS = 8;
@@ -186,6 +199,76 @@ function scatter(items: Box[], area: Rect, rand: () => number): Transform[] {
   return grid(items, area, Math.ceil(Math.sqrt(n)), area.w * 0.4);
 }
 
+type TimelineOpts = { zigzag: boolean; horizontal: boolean; hero: boolean };
+
+/**
+ * The timeline's line and node points (design units), shared by the layout and its line decoration.
+ * With `hero`, the last item gets a big finale cell at the end of the line and `end` is its node.
+ */
+export function timelineGuide(n: number, W: number, H: number, o: TimelineOpts) {
+  const area = safeArea(W, H);
+  const hero = o.hero && n >= 2;
+  const m = hero ? n - 1 : n;
+  const heroSize = hero ? (o.horizontal ? area.w : area.h) * 0.32 : 0;
+  const regular = o.horizontal ? { ...area, w: area.w - heroSize } : { ...area, h: area.h - heroSize };
+  const step = (o.horizontal ? regular.w : regular.h) / Math.max(1, m);
+  const spineX = o.zigzag ? area.x + area.w / 2 : area.x + area.w * 0.06;
+  const spineY = o.zigzag ? area.y + area.h / 2 : area.y + area.h * 0.75;
+  const nodes = Array.from({ length: m }, (_, i) =>
+    o.horizontal ? { x: area.x + step * (i + 0.5), y: spineY } : { x: spineX, y: area.y + step * (i + 0.5) },
+  );
+  const gap = W * 0.035;
+  let end: { x: number; y: number } | null = null;
+  let heroCell: { x: number; y: number; w: number; h: number } | null = null;
+  if (hero) {
+    if (o.horizontal) {
+      end = { x: area.x + regular.w + gap * 0.5, y: spineY };
+      heroCell = { x: end.x + gap * 0.5, y: area.y, w: heroSize - gap, h: area.h };
+    } else if (o.zigzag) {
+      // Centered under the line's end.
+      end = { x: spineX, y: area.y + regular.h + gap * 0.5 };
+      heroCell = { x: area.x, y: end.y + gap, w: area.w, h: heroSize - gap * 1.5 };
+    } else {
+      // Beside the line like the other stops, just bigger.
+      end = { x: spineX, y: area.y + regular.h + heroSize / 2 };
+      heroCell = { x: spineX + gap, y: area.y + regular.h + gap * 0.5, w: area.x + area.w - spineX - gap, h: heroSize - gap };
+    }
+  }
+  return { area: regular, step, nodes, end, heroCell };
+}
+
+/** Stickers in order beside a line; zigzag alternates sides so each can be twice as big. */
+function timeline(items: Box[], W: number, H: number, o: TimelineOpts): Transform[] {
+  const { area, step, nodes, heroCell } = timelineGuide(items.length, W, H, o);
+  const gap = W * 0.035;
+  return items.map((b, i) => {
+    if (heroCell && i === items.length - 1) {
+      const scale = fit(b, heroCell.w, heroCell.h);
+      const w = b.nw * scale;
+      // Non-zigzag vertical keeps the left edge against the line; otherwise center it in the cell.
+      const x = !o.horizontal && !o.zigzag ? heroCell.x + w / 2 : heroCell.x + heroCell.w / 2;
+      return { x, y: heroCell.y + heroCell.h / 2, scale, rotation: 0 };
+    }
+    const node = nodes[i];
+    const side = o.zigzag ? (i % 2 ? 1 : -1) : 1;
+    if (o.horizontal) {
+      const cellW = step * (o.zigzag ? 1.9 : 0.94);
+      const cellH = o.zigzag ? area.h / 2 - gap : area.h * 0.75 - gap;
+      const scale = fit(b, cellW, cellH);
+      const h = b.nh * scale;
+      // Above the line (or below for every other one when zigzagging).
+      const y = side < 0 || !o.zigzag ? node.y - gap - h / 2 : node.y + gap + h / 2;
+      return { x: node.x, y, scale, rotation: 0 };
+    }
+    const cellH = step * (o.zigzag ? 1.9 : 0.94);
+    const cellW = o.zigzag ? area.w / 2 - gap : area.x + area.w - node.x - gap;
+    const scale = fit(b, cellW, cellH);
+    const w = b.nw * scale;
+    const x = side > 0 ? node.x + gap + w / 2 : node.x - gap - w / 2;
+    return { x, y: node.y, scale, rotation: 0 };
+  });
+}
+
 export function applyLayout(id: LayoutId, items: Box[], W: number, H: number, opts: LayoutOptions = {}): Transform[] {
   const rand = opts.rand ?? Math.random;
   const area = safeArea(W, H);
@@ -220,6 +303,11 @@ export function applyLayout(id: LayoutId, items: Box[], W: number, H: number, op
         return { x: cx + Math.cos(a) * r, y: cy + Math.sin(a) * r, scale: fit(b, cell, cell), rotation: 0 };
       });
     }
+    case "shape":
+      if (!opts.mask) return grid(items, area, defaultCols(n), W * 0.4);
+      return placeInShape(items, area, opts.mask, opts.shapeMode ?? "fill");
+    case "timeline":
+      return timeline(items, W, H, { zigzag: opts.zigzag ?? false, horizontal: opts.horizontal ?? false, hero: opts.hero ?? false });
     case "hero": {
       const [first, ...rest] = items;
       const heroH = rest.length ? area.h * 0.5 : area.h;

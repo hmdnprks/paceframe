@@ -12,6 +12,8 @@ export type StravaActivity = {
   average_heartrate?: number;
   max_heartrate?: number;
   average_cadence?: number;
+  /** Runs: 0 default, 1 race, 2 long run, 3 workout. */
+  workout_type?: number | null;
   calories?: number;
   kilojoules?: number;
   map?: { polyline?: string | null; summary_polyline?: string | null };
@@ -33,6 +35,7 @@ export type Activity = {
   cadence?: number;
   calories?: number;
   polyline?: string;
+  race?: boolean;
 };
 
 const RUN_TYPES = new Set(["Run", "TrailRun", "VirtualRun"]);
@@ -57,5 +60,6 @@ export function toActivity(a: StravaActivity): Activity {
     cadence: a.average_cadence ? Math.round(a.average_cadence * (run ? 2 : 1)) : undefined,
     calories: a.calories || undefined,
     polyline: a.map?.polyline || a.map?.summary_polyline || undefined,
+    race: a.workout_type === 1,
   };
 }
